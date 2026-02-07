@@ -1,0 +1,15 @@
+# Compiler output
+cache/
+out/
+
+# Dependencies (installed via forge install)
+lib/
+
+# OS
+.DS_Store
+
+# Deployment artifacts
+deployments/
+
+# Environment
+.env
