@@ -54,7 +54,12 @@ contract Deploy is Script {
                 d.scorerImpl,
                 abi.encodeCall(
                     ReputationScorer.initialize,
-                    (config.reputationRegistry, config.validationRegistry, config.reputationTag, config.maxExpectedValue)
+                    (
+                        config.reputationRegistry,
+                        config.validationRegistry,
+                        config.reputationTag,
+                        config.maxExpectedValue
+                    )
                 )
             )
         );

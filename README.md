@@ -17,6 +17,7 @@ ERC-8004 provides identity, reputation, and validation registries for autonomous
 |---|---|
 | `AgentBondManager.sol` | Bond deposits, task lifecycle, dispute resolution, pull payments. UUPS upgradeable. |
 | `ReputationScorer.sol` | Combines Reputation + Validation registry data into a normalized score. Maps score to bond requirement. UUPS upgradeable. |
+| `MinimalValidationRegistry.sol` | Permissionless testnet validation registry (open request + first-response-wins), compatible with `IERC8004Validation`. |
 | `IReputationScorer.sol` | Composable scoring interface any protocol can implement. |
 
 ## Task Lifecycle
@@ -44,6 +45,12 @@ All payouts use pull-payments via `claim()`.
 - **Registry failure handling**: Grace window prevents immediate slashing during validation registry outages
 - **Pull payments**: Eliminates stuck-task risk from reverting recipients
 - **Reentrancy protection**: Transient storage lock on all state-mutating external functions
+
+## Validation Registry Compatibility
+
+`AgentBondManager` expects `getValidationStatus(requestHash)` to return zero-values (not revert) when no response exists for a request hash. This is how `MinimalValidationRegistry` behaves and how the contract distinguishes "no validation yet" from "registry unavailable."
+
+If you point at a registry that reverts on missing records instead of returning zeroes, `reclaimDisputedTask` will enter the "registry unavailable" path (refund after grace period, no slash) rather than the "no validation" path (slash). The economic outcome differs: refund protects the agent's bond, slash does not. Choose a registry implementation accordingly.
 
 ## Build
 
@@ -100,6 +107,9 @@ The `deploy.sh` wrapper handles env loading, network resolution, signer selectio
 # Deploy with Foundry keystore
 ./script/deploy.sh deploy --network base-sepolia --account deployer
 
+# Deploy standalone MinimalValidationRegistry (if no public registry is available yet)
+./script/deploy.sh deploy-validation --network base-sepolia --account deployer
+
 # Post-deployment verification only
 ./script/deploy.sh smoke-test --network base-sepolia
 
@@ -115,6 +125,20 @@ Signing options: Ledger (default) or Foundry encrypted keystore (`--account <nam
 ```bash
 cast wallet import deployer --interactive
 ```
+
+### Optional: Run your own validation registry on testnet
+
+If an official ERC-8004 validation registry is not available on your target network yet:
+
+1. Deploy `MinimalValidationRegistry` using `deploy-validation`.
+2. Set `VALIDATION_REGISTRY` in `.env` to the deployed address.
+3. Point your validator service at this contract and handle:
+   - `validationRequest(requestHash, agentId, tag, requestURI)` from requestors
+   - `validationResponse(requestHash, agentId, response, responseHash, tag, responseURI)` from validators
+
+`responseHash` is required and must be non-zero (use a deterministic hash of your evidence payload).
+
+`AgentBondManager` and `ReputationScorer` only depend on `getValidationStatus` and `getSummary`, so this drop-in registry enables full dispute-flow testing before the official registry ships.
 
 ## Status
 

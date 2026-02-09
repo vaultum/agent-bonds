@@ -13,8 +13,16 @@ import {IReputationScorer} from "./interfaces/IReputationScorer.sol";
 /// @custom:security-contact dev@vaultum.app
 /// @notice Reputation-collateralized bonding for ERC-8004 agents (UUPS).
 contract AgentBondManager is Initializable, UUPSUpgradeable {
-
-    enum TaskStatus { None, Active, Completed, Disputed, Resolved, Slashed, Expired, Refunded }
+    enum TaskStatus {
+        None,
+        Active,
+        Completed,
+        Disputed,
+        Resolved,
+        Slashed,
+        Expired,
+        Refunded
+    }
 
     struct Bond {
         uint256 amount;
@@ -69,8 +77,13 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     event BondDeposited(uint256 indexed agentId, address indexed depositor, uint256 amount);
     event BondWithdrawn(uint256 indexed agentId, address indexed recipient, uint256 amount);
     event TaskCreated(
-        uint256 indexed taskId, uint256 indexed agentId, address indexed client,
-        uint256 payment, bytes32 taskHash, bytes32 requestHash, uint256 bondLocked
+        uint256 indexed taskId,
+        uint256 indexed agentId,
+        address indexed client,
+        uint256 payment,
+        bytes32 taskHash,
+        bytes32 requestHash,
+        uint256 bondLocked
     );
     event TaskCompleted(uint256 indexed taskId, uint256 indexed agentId);
     event TaskDisputed(uint256 indexed taskId, uint256 indexed agentId);
@@ -118,11 +131,17 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
 
     modifier nonReentrant() {
         uint256 locked;
-        assembly { locked := tload(0) }
+        assembly {
+            locked := tload(0)
+        }
         if (locked != 0) revert Reentrancy();
-        assembly { tstore(0, 1) }
+        assembly {
+            tstore(0, 1)
+        }
         _;
-        assembly { tstore(0, 0) }
+        assembly {
+            tstore(0, 0)
+        }
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -182,13 +201,12 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     /// @notice Requires EIP-712 signature from the agent (or authorized operator/smart wallet).
-    function createTask(
-        uint256 agentId,
-        bytes32 taskHash,
-        uint256 deadline,
-        address signer,
-        bytes calldata agentSig
-    ) external payable nonReentrant returns (uint256 taskId) {
+    function createTask(uint256 agentId, bytes32 taskHash, uint256 deadline, address signer, bytes calldata agentSig)
+        external
+        payable
+        nonReentrant
+        returns (uint256 taskId)
+    {
         if (msg.value == 0) revert ZeroValue();
         if (deadline <= block.timestamp) revert DeadlineInPast();
         if (taskHash == bytes32(0)) revert EmptyTaskHash();
@@ -413,9 +431,8 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     ) internal {
         if (!IDENTITY_REGISTRY.isAuthorizedOrOwner(signer, agentId)) revert InvalidSignature();
         uint256 nonce = agentNonces[agentId]++;
-        bytes32 structHash = keccak256(abi.encode(
-            TASK_PERMIT_TYPEHASH, agentId, client_, payment, deadline, taskHash_, nonce
-        ));
+        bytes32 structHash =
+            keccak256(abi.encode(TASK_PERMIT_TYPEHASH, agentId, client_, payment, deadline, taskHash_, nonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         if (!SignatureChecker.isValidSignatureNow(signer, digest, sig)) revert InvalidSignature();
     }
@@ -446,7 +463,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     function _transferETH(address to, uint256 amount) internal {
-        (bool success, ) = payable(to).call{value: amount}("");
+        (bool success,) = payable(to).call{value: amount}("");
         if (!success) revert TransferFailed();
     }
 
@@ -455,16 +472,12 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         return wallet == address(0) ? IDENTITY_REGISTRY.ownerOf(agentId) : wallet;
     }
 
-    function _requestHash(
-        uint256 taskId,
-        uint256 agentId_,
-        address client_,
-        uint256 payment_,
-        bytes32 taskHash_
-    ) internal view returns (bytes32) {
-        return keccak256(abi.encode(
-            address(this), block.chainid, taskId, agentId_, client_, payment_, taskHash_
-        ));
+    function _requestHash(uint256 taskId, uint256 agentId_, address client_, uint256 payment_, bytes32 taskHash_)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(address(this), block.chainid, taskId, agentId_, client_, payment_, taskHash_));
     }
 
     uint256[50] private __gap;

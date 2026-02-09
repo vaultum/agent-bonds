@@ -13,3 +13,4 @@ deployments/
 
 # Environment
 .env
+.env.local

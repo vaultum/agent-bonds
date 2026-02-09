@@ -16,6 +16,7 @@ Commands:
     preflight       Run pre-flight checks
     dry-run         Execute deployment in dry-run mode (no broadcast)
     deploy          Execute deployment with broadcast
+    deploy-validation Deploy MinimalValidationRegistry only
     smoke-test      Run post-deployment smoke tests
     upgrade         Upgrade a proxy to new implementation
 
@@ -56,6 +57,9 @@ Examples:
 
     # Deploy with Foundry keystore
     $0 deploy --network base-sepolia --account deployer
+
+    # Deploy standalone validation registry
+    $0 deploy-validation --network base-sepolia --account deployer
 
     # Post-deployment verification
     $0 smoke-test --network base-sepolia
@@ -238,6 +242,25 @@ cmd_deploy() {
     cmd_smoke_test "$network"
 }
 
+cmd_deploy_validation() {
+    local network="$1"
+    local rpc_url
+    rpc_url=$(get_rpc_url "$network")
+
+    [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
+
+    resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
+
+    log "Deploying MinimalValidationRegistry on $network..."
+
+    forge script "$PROJECT_ROOT/script/DeployValidationRegistry.s.sol:DeployValidationRegistry" \
+        --root "$PROJECT_ROOT" \
+        --rpc-url "$rpc_url" \
+        --broadcast \
+        "${SIGNER_ARGS[@]}" \
+        -vvvv
+}
+
 cmd_smoke_test() {
     local network="$1"
     local rpc_url
@@ -295,7 +318,7 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            preflight|dry-run|deploy|smoke-test|upgrade)
+            preflight|dry-run|deploy|deploy-validation|smoke-test|upgrade)
                 command="$1"
                 shift
                 ;;
@@ -333,6 +356,7 @@ main() {
         preflight)   cmd_preflight "$network" ;;
         dry-run)     cmd_dry_run "$network" ;;
         deploy)      cmd_deploy "$network" ;;
+        deploy-validation) cmd_deploy_validation "$network" ;;
         smoke-test)  cmd_smoke_test "$network" ;;
         upgrade)     cmd_upgrade "$network" "$target" ;;
         *)           error "Unknown command: $command" ;;

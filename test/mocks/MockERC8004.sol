@@ -152,24 +152,28 @@ contract MockValidationRegistry {
         }
     }
 
-    function getValidationStatus(bytes32 requestHash) external view returns (
-        address validatorAddress,
-        uint256 agentId,
-        uint8 response,
-        bytes32 responseHash,
-        string memory tag,
-        uint256 lastUpdate
-    ) {
+    function getValidationStatus(bytes32 requestHash)
+        external
+        view
+        returns (
+            address validatorAddress,
+            uint256 agentId,
+            uint8 response,
+            bytes32 responseHash,
+            string memory tag,
+            uint256 lastUpdate
+        )
+    {
         require(!forceRevert, "registry unavailable");
         MockValidation memory v = validations[requestHash];
         return (v.validatorAddress, v.agentId, v.response, v.responseHash, v.tag, v.lastUpdate);
     }
 
-    function getSummary(
-        uint256 agentId,
-        address[] calldata,
-        string calldata
-    ) external view returns (uint64 count, uint8 avgResponse) {
+    function getSummary(uint256 agentId, address[] calldata, string calldata)
+        external
+        view
+        returns (uint64 count, uint8 avgResponse)
+    {
         count = uint64(_validationCounts[agentId]);
         if (count > 0) {
             avgResponse = uint8(_validationTotals[agentId] / count);

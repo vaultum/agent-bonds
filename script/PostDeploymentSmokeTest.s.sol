@@ -144,10 +144,18 @@ contract PostDeploymentSmokeTest is Script {
     }
 
     function _envAddress(string memory key) private view returns (address) {
-        try vm.envAddress(key) returns (address v) { return v; } catch { return address(0); }
+        try vm.envAddress(key) returns (address v) {
+            return v;
+        } catch {
+            return address(0);
+        }
     }
 
     function _parseAddress(string memory json, string memory key) private pure returns (address) {
-        try vm.parseJsonAddress(json, key) returns (address v) { return v; } catch { return address(0); }
+        try vm.parseJsonAddress(json, key) returns (address v) {
+            return v;
+        } catch {
+            return address(0);
+        }
     }
 }

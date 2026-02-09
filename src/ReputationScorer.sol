@@ -155,8 +155,7 @@ contract ReputationScorer is IReputationScorer, Initializable, UUPSUpgradeable {
         if (feedbackCount == 0) return (0, 0);
 
         if (repCount > 0 && valCount > 0) {
-            score = (repScore * reputationWeight + valScore * validationWeight)
-                / (reputationWeight + validationWeight);
+            score = (repScore * reputationWeight + valScore * validationWeight) / (reputationWeight + validationWeight);
         } else if (repCount > 0) {
             score = repScore;
         } else {
@@ -166,7 +165,7 @@ contract ReputationScorer is IReputationScorer, Initializable, UUPSUpgradeable {
 
     /// @inheritdoc IReputationScorer
     function getRequiredBond(uint256 agentId, uint256 taskValue) public view returns (uint256) {
-        (uint256 score, ) = getScore(agentId);
+        (uint256 score,) = getScore(agentId);
         uint256 bondBps = MAX_BOND_BPS - (score * (MAX_BOND_BPS - MIN_BOND_BPS) / MAX_SCORE);
         return (taskValue * bondBps) / MAX_BOND_BPS;
     }
@@ -207,9 +206,7 @@ contract ReputationScorer is IReputationScorer, Initializable, UUPSUpgradeable {
 
     function _validationScore(uint256 agentId) internal view returns (uint256 score, uint64 count) {
         if (_trustedValidators.length == 0) return (0, 0);
-        try VALIDATION_REGISTRY.getSummary(agentId, _trustedValidators, "") returns (
-            uint64 n, uint8 avg
-        ) {
+        try VALIDATION_REGISTRY.getSummary(agentId, _trustedValidators, "") returns (uint64 n, uint8 avg) {
             count = n;
             if (n == 0) return (0, 0);
             score = uint256(avg) * 100;

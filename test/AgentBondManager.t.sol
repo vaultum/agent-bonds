@@ -16,13 +16,13 @@ contract AgentBondManagerTest is Test {
 
     uint256 internal constant AGENT_OWNER_PK = 0xA11CE;
     address internal agentOwner;
-    address client    = makeAddr("client");
+    address client = makeAddr("client");
     address validator = makeAddr("validator");
     uint256 agentId;
 
-    uint256 constant DISPUTE_PERIOD    = 7 days;
-    uint8   constant MIN_PASSING_SCORE = 50;
-    uint256 constant SLASH_BPS         = 5000;
+    uint256 constant DISPUTE_PERIOD = 7 days;
+    uint8 constant MIN_PASSING_SCORE = 50;
+    uint256 constant SLASH_BPS = 5000;
 
     bytes32 private constant TASK_PERMIT_TYPEHASH = keccak256(
         "TaskPermit(uint256 agentId,address client,uint256 payment,uint256 deadline,bytes32 taskHash,uint256 nonce)"
@@ -31,7 +31,7 @@ contract AgentBondManagerTest is Test {
     function setUp() public {
         agentOwner = vm.addr(AGENT_OWNER_PK);
 
-        identity   = new MockIdentityRegistry();
+        identity = new MockIdentityRegistry();
         reputation = new MockReputationRegistry();
         validation = new MockValidationRegistry();
 
@@ -69,19 +69,14 @@ contract AgentBondManagerTest is Test {
         bytes32 taskHash_,
         uint256 nonce
     ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(TASK_PERMIT_TYPEHASH, agentId_, client_, payment, deadline, taskHash_, nonce)
-        );
+        bytes32 structHash =
+            keccak256(abi.encode(TASK_PERMIT_TYPEHASH, agentId_, client_, payment, deadline, taskHash_, nonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(AGENT_OWNER_PK, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _createTask(
-        bytes32 taskHash,
-        uint256 deadline,
-        uint256 payment
-    ) internal returns (uint256) {
+    function _createTask(bytes32 taskHash, uint256 deadline, uint256 payment) internal returns (uint256) {
         uint256 nonce = manager.agentNonces(agentId);
         bytes memory sig = _signPermit(agentId, client, payment, deadline, taskHash, nonce);
         vm.prank(client);
@@ -120,7 +115,7 @@ contract AgentBondManagerTest is Test {
         vm.prank(agentOwner);
         manager.withdrawBond(agentId, 5 ether);
 
-        (uint256 amount, ) = manager.getBond(agentId);
+        (uint256 amount,) = manager.getBond(agentId);
         assertEq(amount, 5 ether);
         assertEq(agentOwner.balance, balanceBefore + 5 ether);
     }
@@ -164,9 +159,8 @@ contract AgentBondManagerTest is Test {
         bytes32 taskHash = keccak256("task");
         uint256 deadline = block.timestamp + 1 days;
         uint256 nonce = manager.agentNonces(agentId);
-        bytes32 structHash = keccak256(
-            abi.encode(TASK_PERMIT_TYPEHASH, agentId, client, 1 ether, deadline, taskHash, nonce)
-        );
+        bytes32 structHash =
+            keccak256(abi.encode(TASK_PERMIT_TYPEHASH, agentId, client, 1 ether, deadline, taskHash, nonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xDEAD, digest);
         bytes memory badSig = abi.encodePacked(r, s, v);
@@ -627,7 +621,7 @@ contract AgentBondManagerTest is Test {
 
         (, uint256 locked) = manager.getBond(agentId);
         assertEq(locked, 0);
-        (uint256 amt, ) = manager.getBond(agentId);
+        (uint256 amt,) = manager.getBond(agentId);
         assertEq(amt, 10 ether);
     }
 
@@ -675,8 +669,7 @@ contract AgentBondManagerTest is Test {
     function test_cannotReinitialize() public {
         vm.expectRevert();
         manager.initialize(
-            address(identity), address(validation), address(scorer),
-            DISPUTE_PERIOD, MIN_PASSING_SCORE, SLASH_BPS
+            address(identity), address(validation), address(scorer), DISPUTE_PERIOD, MIN_PASSING_SCORE, SLASH_BPS
         );
     }
 

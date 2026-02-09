@@ -174,15 +174,27 @@ contract PreFlightCheck is Script {
     }
 
     function _envAddress(string memory key) private view returns (address) {
-        try vm.envAddress(key) returns (address v) { return v; } catch { return address(0); }
+        try vm.envAddress(key) returns (address v) {
+            return v;
+        } catch {
+            return address(0);
+        }
     }
 
     function _envUint(string memory key) private view returns (uint256) {
-        try vm.envUint(key) returns (uint256 v) { return v; } catch { return 0; }
+        try vm.envUint(key) returns (uint256 v) {
+            return v;
+        } catch {
+            return 0;
+        }
     }
 
     function _parseAddress(string memory json, string memory key) private pure returns (address) {
-        try vm.parseJsonAddress(json, key) returns (address v) { return v; } catch { return address(0); }
+        try vm.parseJsonAddress(json, key) returns (address v) {
+            return v;
+        } catch {
+            return address(0);
+        }
     }
 
     function _record(bool passed, string memory message) private {
