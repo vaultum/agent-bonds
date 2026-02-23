@@ -20,6 +20,8 @@ contract Deploy is Script {
         uint256 disputePeriod;
         uint8 minPassingScore;
         uint256 slashBps;
+        uint8 validationFinalityPolicy;
+        uint8 statusLookupFailurePolicy;
     }
 
     struct Deployment {
@@ -86,6 +88,10 @@ contract Deploy is Script {
         );
         console2.log("AgentBondManager proxy:", d.managerProxy);
 
+        AgentBondManager manager = AgentBondManager(payable(d.managerProxy));
+        manager.setValidationFinalityPolicy(config.validationFinalityPolicy);
+        manager.setStatusLookupFailurePolicy(config.statusLookupFailurePolicy);
+
         vm.stopBroadcast();
 
         _writeArtifacts(outputPath, d, config);
@@ -100,6 +106,23 @@ contract Deploy is Script {
         c.reputationTag = vm.envString("REPUTATION_TAG");
         c.maxExpectedValue = vm.envUint("MAX_EXPECTED_VALUE");
         c.disputePeriod = vm.envUint("DISPUTE_PERIOD");
+        uint256 rawValidationFinalityPolicy = _envUintOrDefault(
+            "VALIDATION_FINALITY_POLICY",
+            uint256(uint8(AgentBondManager.ValidationFinalityPolicy.ResponseHashRequired))
+        );
+        if (rawValidationFinalityPolicy > uint8(AgentBondManager.ValidationFinalityPolicy.AnyStatusRecord)) {
+            revert("VALIDATION_FINALITY_POLICY out of range");
+        }
+        c.validationFinalityPolicy = uint8(rawValidationFinalityPolicy);
+
+        uint256 rawStatusLookupFailurePolicy = _envUintOrDefault(
+            "STATUS_LOOKUP_FAILURE_POLICY",
+            uint256(uint8(AgentBondManager.StatusLookupFailurePolicy.CanonicalUnknownAsMissing))
+        );
+        if (rawStatusLookupFailurePolicy > uint8(AgentBondManager.StatusLookupFailurePolicy.AlwaysUnavailable)) {
+            revert("STATUS_LOOKUP_FAILURE_POLICY out of range");
+        }
+        c.statusLookupFailurePolicy = uint8(rawStatusLookupFailurePolicy);
 
         uint256 rawScore = vm.envUint("MIN_PASSING_SCORE");
         if (rawScore > 100) revert("MIN_PASSING_SCORE exceeds 100");
@@ -118,6 +141,12 @@ contract Deploy is Script {
         if (c.minPassingScore == 0 || c.minPassingScore > 100) revert("MIN_PASSING_SCORE out of range [1,100]");
         if (c.slashBps > 10_000) revert("SLASH_BPS exceeds 10000");
         if (c.disputePeriod > 90 days) revert("DISPUTE_PERIOD exceeds 90 days");
+        if (c.validationFinalityPolicy > uint8(AgentBondManager.ValidationFinalityPolicy.AnyStatusRecord)) {
+            revert("VALIDATION_FINALITY_POLICY out of range");
+        }
+        if (c.statusLookupFailurePolicy > uint8(AgentBondManager.StatusLookupFailurePolicy.AlwaysUnavailable)) {
+            revert("STATUS_LOOKUP_FAILURE_POLICY out of range");
+        }
 
         if (c.identityRegistry.code.length == 0) revert("IDENTITY_REGISTRY has no code");
         if (c.reputationRegistry.code.length == 0) revert("REPUTATION_REGISTRY has no code");
@@ -141,6 +170,8 @@ contract Deploy is Script {
         json = vm.serializeUint(key, "disputePeriod", c.disputePeriod);
         json = vm.serializeUint(key, "minPassingScore", uint256(c.minPassingScore));
         json = vm.serializeUint(key, "slashBps", c.slashBps);
+        json = vm.serializeUint(key, "validationFinalityPolicy", uint256(c.validationFinalityPolicy));
+        json = vm.serializeUint(key, "statusLookupFailurePolicy", uint256(c.statusLookupFailurePolicy));
         json = vm.serializeUint(key, "timestamp", block.timestamp);
 
         vm.writeJson(json, path);
@@ -155,7 +186,21 @@ contract Deploy is Script {
         console2.log("Dispute Period:", c.disputePeriod);
         console2.log("Min Passing Score:", uint256(c.minPassingScore));
         console2.log("Slash BPS:", c.slashBps);
+        console2.log("Validation finality policy:", uint256(c.validationFinalityPolicy));
+        console2.log("Status lookup failure policy:", uint256(c.statusLookupFailurePolicy));
         console2.log("");
+    }
+
+    function _envUintOrDefault(string memory key, uint256 defaultValue) private view returns (uint256 value) {
+        try vm.envString(key) returns (string memory raw) {
+            try vm.parseUint(raw) returns (uint256 parsed) {
+                return parsed;
+            } catch {
+                revert(string.concat(key, " must be a valid uint256"));
+            }
+        } catch {
+            return defaultValue;
+        }
     }
 
     function _logDeployment(Deployment memory d) private pure {

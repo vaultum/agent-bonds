@@ -17,7 +17,6 @@ ERC-8004 provides identity, reputation, and validation registries for autonomous
 |---|---|
 | `AgentBondManager.sol` | Bond deposits, task lifecycle, dispute resolution, pull payments. UUPS upgradeable. |
 | `ReputationScorer.sol` | Combines Reputation + Validation registry data into a normalized score. Maps score to bond requirement. UUPS upgradeable. |
-| `MinimalValidationRegistry.sol` | Permissionless testnet validation registry (open request + first-response-wins), compatible with `IERC8004Validation`. |
 | `IReputationScorer.sol` | Composable scoring interface any protocol can implement. |
 
 ## Task Lifecycle
@@ -40,17 +39,24 @@ All payouts use pull-payments via `claim()`.
 ## Security Properties
 
 - **Agent consent**: Tasks require EIP-712 signature (supports EOA and ERC-1271 smart wallets)
-- **Parameter snapshots**: `minPassingScore`, `slashBps`, `disputePeriod`, `registryGracePeriod` are captured per-task at creation/dispute time -- admin changes don't affect in-flight tasks
+- **Parameter snapshots**: `minPassingScore`, `slashBps`, `disputePeriod`, `registryGracePeriod`, and validation policy modes are captured per-task at creation/dispute time -- admin changes don't affect in-flight tasks
 - **Bounded admin controls**: Dispute period capped at 90 days, slash basis points at 10,000, scoring weights at 10,000, trusted lists at 200 entries
 - **Registry failure handling**: Grace window prevents immediate slashing during validation registry outages
+- **Upgrade-safe task decoding**: Recipient fields are appended in `Task`; zero-recipient legacy tasks fall back to legacy payout/hash behavior
 - **Pull payments**: Eliminates stuck-task risk from reverting recipients
 - **Reentrancy protection**: Transient storage lock on all state-mutating external functions
 
 ## Validation Registry Compatibility
 
-`AgentBondManager` expects `getValidationStatus(requestHash)` to return zero-values (not revert) when no response exists for a request hash. This is how `MinimalValidationRegistry` behaves and how the contract distinguishes "no validation yet" from "registry unavailable."
+Agent Bonds uses the official ERC-8004 `ValidationRegistryUpgradeable` deployed on Sepolia, Base Sepolia, OP Sepolia, and other networks listed at [erc-8004/erc-8004-contracts](https://github.com/erc-8004/erc-8004-contracts).
 
-If you point at a registry that reverts on missing records instead of returning zeroes, `reclaimDisputedTask` will enter the "registry unavailable" path (refund after grace period, no slash) rather than the "no validation" path (slash). The economic outcome differs: refund protects the agent's bond, slash does not. Choose a registry implementation accordingly.
+Compatibility assumptions enforced by `AgentBondManager`:
+
+- Validation finality defaults to `ResponseHashRequired` (`setValidationFinalityPolicy(0)`), so `responseHash == 0` is treated as no final response.
+- Optional mode `AnyStatusRecord` (`setValidationFinalityPolicy(1)`) treats any returned status record as final.
+- Status lookup failure handling defaults to `CanonicalUnknownAsMissing` (`setStatusLookupFailurePolicy(0)`), which classifies failed status reads by checking whether `requestHash` exists in `getAgentValidations(agentId)`.
+- Fallback policies are configurable: `AlwaysMissing` (`1`) or `AlwaysUnavailable` (`2`).
+
 
 ## Build
 
@@ -89,6 +95,8 @@ cp .env.example .env
 | `DISPUTE_PERIOD` | Dispute window in seconds (max 90 days) |
 | `MIN_PASSING_SCORE` | Minimum validation score to pass dispute (1-100) |
 | `SLASH_BPS` | Slash percentage in basis points (max 10000) |
+| `VALIDATION_FINALITY_POLICY` | 0=ResponseHashRequired, 1=AnyStatusRecord |
+| `STATUS_LOOKUP_FAILURE_POLICY` | 0=CanonicalUnknownAsMissing, 1=AlwaysMissing, 2=AlwaysUnavailable |
 
 ### Deploy
 
@@ -107,9 +115,6 @@ The `deploy.sh` wrapper handles env loading, network resolution, signer selectio
 # Deploy with Foundry keystore
 ./script/deploy.sh deploy --network base-sepolia --account deployer
 
-# Deploy standalone MinimalValidationRegistry (if no public registry is available yet)
-./script/deploy.sh deploy-validation --network base-sepolia --account deployer
-
 # Post-deployment verification only
 ./script/deploy.sh smoke-test --network base-sepolia
 
@@ -125,20 +130,6 @@ Signing options: Ledger (default) or Foundry encrypted keystore (`--account <nam
 ```bash
 cast wallet import deployer --interactive
 ```
-
-### Optional: Run your own validation registry on testnet
-
-If an official ERC-8004 validation registry is not available on your target network yet:
-
-1. Deploy `MinimalValidationRegistry` using `deploy-validation`.
-2. Set `VALIDATION_REGISTRY` in `.env` to the deployed address.
-3. Point your validator service at this contract and handle:
-   - `validationRequest(requestHash, agentId, tag, requestURI)` from requestors
-   - `validationResponse(requestHash, agentId, response, responseHash, tag, responseURI)` from validators
-
-`responseHash` is required and must be non-zero (use a deterministic hash of your evidence payload).
-
-`AgentBondManager` and `ReputationScorer` only depend on `getValidationStatus` and `getSummary`, so this drop-in registry enables full dispute-flow testing before the official registry ships.
 
 ## Status
 

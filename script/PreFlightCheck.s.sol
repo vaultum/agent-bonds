@@ -28,6 +28,7 @@ contract PreFlightCheck is Script {
         _checkRegistries();
         _checkScorerParams();
         _checkManagerParams();
+        _checkPolicyParams();
         _checkExistingDeployment();
 
         _printSummary();
@@ -120,6 +121,36 @@ contract PreFlightCheck is Script {
         console2.log("");
     }
 
+    function _checkPolicyParams() private {
+        console2.log("Checking AgentBondManager policy params...");
+
+        (bool hasValidityPolicy, bool validityPolicyValid, uint256 validityPolicy) =
+            _envOptionalUint("VALIDATION_FINALITY_POLICY");
+        if (!hasValidityPolicy) {
+            _record(true, "VALIDATION_FINALITY_POLICY: not set (defaulting to 0)");
+        } else if (!validityPolicyValid) {
+            _record(false, "VALIDATION_FINALITY_POLICY: invalid uint256");
+        } else if (validityPolicy > 1) {
+            _record(false, string.concat("VALIDATION_FINALITY_POLICY: ", vm.toString(validityPolicy), " out of range [0-1]"));
+        } else {
+            _record(true, string.concat("VALIDATION_FINALITY_POLICY: ", vm.toString(validityPolicy)));
+        }
+
+        (bool hasFailurePolicy, bool failurePolicyValid, uint256 failurePolicy) =
+            _envOptionalUint("STATUS_LOOKUP_FAILURE_POLICY");
+        if (!hasFailurePolicy) {
+            _record(true, "STATUS_LOOKUP_FAILURE_POLICY: not set (defaulting to 0)");
+        } else if (!failurePolicyValid) {
+            _record(false, "STATUS_LOOKUP_FAILURE_POLICY: invalid uint256");
+        } else if (failurePolicy > 2) {
+            _record(false, string.concat("STATUS_LOOKUP_FAILURE_POLICY: ", vm.toString(failurePolicy), " out of range [0-2]"));
+        } else {
+            _record(true, string.concat("STATUS_LOOKUP_FAILURE_POLICY: ", vm.toString(failurePolicy)));
+        }
+
+        console2.log("");
+    }
+
     function _checkExistingDeployment() private {
         console2.log("Checking existing deployments...");
 
@@ -186,6 +217,18 @@ contract PreFlightCheck is Script {
             return v;
         } catch {
             return 0;
+        }
+    }
+
+    function _envOptionalUint(string memory key) private view returns (bool exists, bool valid, uint256 value) {
+        try vm.envString(key) returns (string memory raw) {
+            try vm.parseUint(raw) returns (uint256 parsed) {
+                return (true, true, parsed);
+            } catch {
+                return (true, false, 0);
+            }
+        } catch {
+            return (false, true, 0);
         }
     }
 

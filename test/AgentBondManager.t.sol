@@ -23,10 +23,18 @@ contract AgentBondManagerTest is Test {
     uint256 constant DISPUTE_PERIOD = 7 days;
     uint8 constant MIN_PASSING_SCORE = 50;
     uint256 constant SLASH_BPS = 5000;
+    uint8 constant FINALITY_POLICY_RESPONSE_HASH_REQUIRED = 0;
+    uint8 constant FINALITY_POLICY_ANY_STATUS_RECORD = 1;
+    uint8 constant STATUS_LOOKUP_POLICY_CANONICAL_UNKNOWN_AS_MISSING = 0;
+    uint8 constant STATUS_LOOKUP_POLICY_ALWAYS_MISSING = 1;
+    uint8 constant STATUS_LOOKUP_POLICY_ALWAYS_UNAVAILABLE = 2;
 
     bytes32 private constant TASK_PERMIT_TYPEHASH = keccak256(
-        "TaskPermit(uint256 agentId,address client,uint256 payment,uint256 deadline,bytes32 taskHash,uint256 nonce)"
+        "TaskPermit(uint256 agentId,address client,address agentRecipient,address clientRecipient,address committedValidator,uint256 payment,uint256 deadline,bytes32 taskHash,uint256 nonce)"
     );
+
+    event DisputeExpiredClaimed(uint256 indexed taskId, address indexed beneficiary);
+    event DisputeRefundedNoRegistry(uint256 indexed taskId, address indexed beneficiary);
 
     function setUp() public {
         agentOwner = vm.addr(AGENT_OWNER_PK);
@@ -64,23 +72,65 @@ contract AgentBondManagerTest is Test {
     function _signPermit(
         uint256 agentId_,
         address client_,
+        address agentRecipient_,
+        address clientRecipient_,
+        address committedValidator_,
         uint256 payment,
         uint256 deadline,
         bytes32 taskHash_,
         uint256 nonce
     ) internal view returns (bytes memory) {
-        bytes32 structHash =
-            keccak256(abi.encode(TASK_PERMIT_TYPEHASH, agentId_, client_, payment, deadline, taskHash_, nonce));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                TASK_PERMIT_TYPEHASH,
+                agentId_,
+                client_,
+                agentRecipient_,
+                clientRecipient_,
+                committedValidator_,
+                payment,
+                deadline,
+                taskHash_,
+                nonce
+            )
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(AGENT_OWNER_PK, digest);
         return abi.encodePacked(r, s, v);
     }
 
     function _createTask(bytes32 taskHash, uint256 deadline, uint256 payment) internal returns (uint256) {
+        return _createTaskWithRecipients(taskHash, deadline, payment, agentOwner, client);
+    }
+
+    function _createTaskWithRecipients(
+        bytes32 taskHash,
+        uint256 deadline,
+        uint256 payment,
+        address agentRecipient_,
+        address clientRecipient_
+    ) internal returns (uint256) {
+        return _createTaskWithRecipientsAndValidator(
+            taskHash, deadline, payment, agentRecipient_, clientRecipient_, validator
+        );
+    }
+
+    function _createTaskWithRecipientsAndValidator(
+        bytes32 taskHash,
+        uint256 deadline,
+        uint256 payment,
+        address agentRecipient_,
+        address clientRecipient_,
+        address committedValidator_
+    ) internal returns (uint256) {
         uint256 nonce = manager.agentNonces(agentId);
-        bytes memory sig = _signPermit(agentId, client, payment, deadline, taskHash, nonce);
+        bytes memory sig = _signPermit(
+            agentId, client, agentRecipient_, clientRecipient_, committedValidator_, payment, deadline, taskHash, nonce
+        );
         vm.prank(client);
-        return manager.createTask{value: payment}(agentId, taskHash, deadline, agentOwner, sig);
+        return manager.createTask{value: payment}(
+            agentId, taskHash, deadline, agentOwner, agentRecipient_, clientRecipient_, committedValidator_, sig
+        );
     }
 
     // --- Bond Tests ---
@@ -148,7 +198,59 @@ contract AgentBondManagerTest is Test {
         assertEq(task.snapshotMinPassingScore, MIN_PASSING_SCORE);
         assertEq(task.snapshotSlashBps, SLASH_BPS);
         assertEq(task.snapshotDisputePeriod, DISPUTE_PERIOD);
+        assertEq(task.committedValidator, validator);
         assertTrue(task.status == AgentBondManager.TaskStatus.Active);
+    }
+
+    function test_createTask_storesCustomRecipients() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        address agentRecipient_ = makeAddr("agent-recipient");
+        address clientRecipient_ = makeAddr("client-recipient");
+        uint256 taskId = _createTaskWithRecipients(
+            keccak256("task-custom-recipient"), block.timestamp + 1 days, 1 ether, agentRecipient_, clientRecipient_
+        );
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertEq(task.agentRecipient, agentRecipient_);
+        assertEq(task.clientRecipient, clientRecipient_);
+    }
+
+    function test_createTask_revertsWhenPermitRecipientsDoNotMatchCall() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        address permittedAgentRecipient = makeAddr("permitted-agent-recipient");
+        address permittedClientRecipient = makeAddr("permitted-client-recipient");
+
+        bytes32 taskHash = keccak256("recipient-mismatch");
+        uint256 deadline = block.timestamp + 1 days;
+        uint256 nonce = manager.agentNonces(agentId);
+        bytes memory sig = _signPermit(
+            agentId,
+            client,
+            permittedAgentRecipient,
+            permittedClientRecipient,
+            validator,
+            1 ether,
+            deadline,
+            taskHash,
+            nonce
+        );
+
+        vm.prank(client);
+        vm.expectRevert(AgentBondManager.InvalidSignature.selector);
+        manager.createTask{value: 1 ether}(
+            agentId,
+            taskHash,
+            deadline,
+            agentOwner,
+            permittedAgentRecipient,
+            makeAddr("different-client-recipient"),
+            validator,
+            sig
+        );
     }
 
     function test_createTask_revertsForInvalidSignature() public {
@@ -159,15 +261,71 @@ contract AgentBondManagerTest is Test {
         bytes32 taskHash = keccak256("task");
         uint256 deadline = block.timestamp + 1 days;
         uint256 nonce = manager.agentNonces(agentId);
-        bytes32 structHash =
-            keccak256(abi.encode(TASK_PERMIT_TYPEHASH, agentId, client, 1 ether, deadline, taskHash, nonce));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                TASK_PERMIT_TYPEHASH, agentId, client, agentOwner, client, validator, 1 ether, deadline, taskHash, nonce
+            )
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xDEAD, digest);
         bytes memory badSig = abi.encodePacked(r, s, v);
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.InvalidSignature.selector);
-        manager.createTask{value: 1 ether}(agentId, taskHash, deadline, agentOwner, badSig);
+        manager.createTask{value: 1 ether}(
+            agentId, taskHash, deadline, agentOwner, agentOwner, client, validator, badSig
+        );
+
+        assertEq(manager.agentNonces(agentId), nonce);
+    }
+
+    function test_createTask_revertsForZeroRecipient() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        vm.prank(client);
+        vm.expectRevert(AgentBondManager.ZeroAddress.selector);
+        manager.createTask{value: 1 ether}(
+            agentId,
+            keccak256("zero-recipient"),
+            block.timestamp + 1 days,
+            agentOwner,
+            address(0),
+            client,
+            validator,
+            hex""
+        );
+    }
+
+    function test_createTask_revertsForZeroCommittedValidator() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 nonce = manager.agentNonces(agentId);
+        bytes memory sig = _signPermit(
+            agentId,
+            client,
+            agentOwner,
+            client,
+            address(0),
+            1 ether,
+            block.timestamp + 1 days,
+            keccak256("zero-validator"),
+            nonce
+        );
+
+        vm.prank(client);
+        vm.expectRevert(AgentBondManager.ZeroAddress.selector);
+        manager.createTask{value: 1 ether}(
+            agentId,
+            keccak256("zero-validator"),
+            block.timestamp + 1 days,
+            agentOwner,
+            agentOwner,
+            client,
+            address(0),
+            sig
+        );
     }
 
     function test_createTask_nonceIncrementsPerTask() public {
@@ -183,11 +341,15 @@ contract AgentBondManagerTest is Test {
 
     function test_createTask_revertsIfInsufficientBond() public {
         uint256 nonce = manager.agentNonces(agentId);
-        bytes memory sig = _signPermit(agentId, client, 1 ether, block.timestamp + 1 days, keccak256("task"), nonce);
+        bytes memory sig = _signPermit(
+            agentId, client, agentOwner, client, validator, 1 ether, block.timestamp + 1 days, keccak256("task"), nonce
+        );
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.InsufficientBond.selector);
-        manager.createTask{value: 1 ether}(agentId, keccak256("task"), block.timestamp + 1 days, agentOwner, sig);
+        manager.createTask{value: 1 ether}(
+            agentId, keccak256("task"), block.timestamp + 1 days, agentOwner, agentOwner, client, validator, sig
+        );
     }
 
     function test_createTask_revertsForPastDeadline() public {
@@ -195,11 +357,15 @@ contract AgentBondManagerTest is Test {
         manager.depositBond{value: 10 ether}(agentId);
 
         uint256 nonce = manager.agentNonces(agentId);
-        bytes memory sig = _signPermit(agentId, client, 1 ether, block.timestamp - 1, keccak256("task"), nonce);
+        bytes memory sig = _signPermit(
+            agentId, client, agentOwner, client, validator, 1 ether, block.timestamp - 1, keccak256("task"), nonce
+        );
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.DeadlineInPast.selector);
-        manager.createTask{value: 1 ether}(agentId, keccak256("task"), block.timestamp - 1, agentOwner, sig);
+        manager.createTask{value: 1 ether}(
+            agentId, keccak256("task"), block.timestamp - 1, agentOwner, agentOwner, client, validator, sig
+        );
     }
 
     // --- Complete Task Tests ---
@@ -219,6 +385,22 @@ contract AgentBondManagerTest is Test {
 
         (, uint256 locked) = manager.getBond(agentId);
         assertEq(locked, 0);
+    }
+
+    function test_completeTask_creditsCustomAgentRecipient() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        address agentRecipient_ = makeAddr("agent-complete-recipient");
+        uint256 taskId = _createTaskWithRecipients(
+            keccak256("task-agent-recipient"), block.timestamp + 1 days, 1 ether, agentRecipient_, client
+        );
+
+        vm.prank(client);
+        manager.completeTask(taskId);
+
+        assertEq(manager.claimable(agentRecipient_), 1 ether);
+        assertEq(manager.claimable(agentOwner), 0);
     }
 
     function test_completeTask_revertsForNonClient() public {
@@ -282,6 +464,28 @@ contract AgentBondManagerTest is Test {
         assertEq(bondLocked, 0);
     }
 
+    function test_disputeAndResolve_clientWins_creditsCustomClientRecipient() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        address clientRecipient_ = makeAddr("client-slash-recipient");
+        uint256 taskId = _createTaskWithRecipients(
+            keccak256("task-bad-custom-recipient"), block.timestamp + 1 days, 1 ether, agentOwner, clientRecipient_
+        );
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 30, true);
+
+        manager.resolveDispute(taskId);
+
+        uint256 expectedSlash = (1 ether * SLASH_BPS) / 10_000;
+        assertEq(manager.claimable(clientRecipient_), 1 ether + expectedSlash);
+        assertEq(manager.claimable(client), 0);
+    }
+
     function test_resolveDispute_revertsWithoutValidation() public {
         vm.prank(agentOwner);
         manager.depositBond{value: 10 ether}(agentId);
@@ -291,7 +495,7 @@ contract AgentBondManagerTest is Test {
         vm.prank(client);
         manager.disputeTask(taskId);
 
-        vm.expectRevert(AgentBondManager.AgentMismatch.selector);
+        vm.expectRevert(AgentBondManager.NoValidationResponse.selector);
         manager.resolveDispute(taskId);
     }
 
@@ -314,6 +518,75 @@ contract AgentBondManagerTest is Test {
         assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
     }
 
+    function test_resolveDispute_revertsWhenValidationPending() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("pending-response"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        vm.expectRevert(AgentBondManager.NoValidationResponse.selector);
+        manager.resolveDispute(taskId);
+    }
+
+    function test_resolveDispute_pendingCanSettleWhenAnyStatusPolicy() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        manager.setValidationFinalityPolicy(FINALITY_POLICY_ANY_STATUS_RECORD);
+
+        uint256 taskId = _createTask(keccak256("pending-policy"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        manager.resolveDispute(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+    }
+
+    function test_resolveDispute_validationPolicySnapshottedAtDispute() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("pending-policy-snapshot"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        manager.setValidationFinalityPolicy(FINALITY_POLICY_ANY_STATUS_RECORD);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        vm.expectRevert(AgentBondManager.NoValidationResponse.selector);
+        manager.resolveDispute(taskId);
+    }
+
+    function test_resolveDispute_revertsWithoutValidation_whenUnknownReverts() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("unknown-no-validation"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setUnknownReverts(true);
+
+        vm.expectRevert(AgentBondManager.NoValidationResponse.selector);
+        manager.resolveDispute(taskId);
+    }
+
     // --- Reclaim & Expiry Tests ---
 
     function test_reclaimDisputedTask() public {
@@ -333,6 +606,275 @@ contract AgentBondManagerTest is Test {
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
         assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+    }
+
+    function test_reclaimDisputedTask_slashesWhenValidationPending() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("pending-reclaim"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+    }
+
+    function test_reclaimDisputedTask_unknownRevertSlashes() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        address clientRecipient_ = makeAddr("client-reclaim-slash-recipient");
+        uint256 taskId = _createTaskWithRecipients(
+            keccak256("unknown-reclaim"), block.timestamp + 1 days, 1 ether, agentOwner, clientRecipient_
+        );
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setUnknownReverts(true);
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        vm.expectEmit(true, true, false, false, address(manager));
+        emit DisputeExpiredClaimed(taskId, clientRecipient_);
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertEq(manager.registryFailureSince(taskId), 0);
+        assertEq(manager.claimable(clientRecipient_), 1.5 ether);
+        assertEq(manager.claimable(client), 0);
+    }
+
+    function test_reclaimDisputedTask_statusRevertUnknownRequestSlashesByDefault() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("status-revert-reclaim"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setForceStatusRevert(true, "custom status error");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertEq(manager.registryFailureSince(taskId), 0);
+    }
+
+    function test_reclaimDisputedTask_canonicalFailureUsesCachedRequestKnownness_knownRequest() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("cached-known-request"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        // If reclaim re-scans request knownness instead of using the dispute snapshot cache,
+        // this override would flip classification to "missing" and slash.
+        bytes32[] memory emptySet = new bytes32[](0);
+        validation.setAgentValidationsOverride(agentId, emptySet);
+        validation.setForceStatusRevert(true, "status read failed");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+        assertGt(manager.registryFailureSince(taskId), 0);
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Disputed);
+
+        vm.warp(block.timestamp + 3 days + 1);
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
+        assertEq(manager.claimable(client), 1 ether);
+    }
+
+    function test_reclaimDisputedTask_canonicalFailureUsesCachedRequestKnownness_unknownRequest() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("cached-unknown-request"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        // If reclaim re-scans knownness, this late override would force "known" and route to unavailable.
+        bytes32[] memory knownSet = new bytes32[](1);
+        knownSet[0] = reqHash;
+        validation.setAgentValidationsOverride(agentId, knownSet);
+        validation.setForceStatusRevert(true, "status read failed");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertEq(manager.registryFailureSince(taskId), 0);
+        assertEq(manager.claimable(client), 1.5 ether);
+    }
+
+    function test_reclaimDisputedTask_statusRevertKnownRequestUnavailableByDefault() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("status-revert-known-request"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setForceStatusRevert(true, "custom status error");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+
+        assertGt(manager.registryFailureSince(taskId), 0);
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Disputed);
+    }
+
+    function test_reclaimDisputedTask_statusRevertSlashesWhenPolicyAlwaysMissing() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("status-revert-missing"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_MISSING);
+        validation.setForceStatusRevert(true, "custom status error");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertEq(manager.registryFailureSince(taskId), 0);
+    }
+
+    function test_reclaimDisputedTask_nonCanonicalPolicy_skipsKnownnessScan() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 20 ether}(agentId);
+
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_MISSING);
+        uint256 slashTaskId = _createTask(keccak256("non-canonical-missing"), block.timestamp + 1 days, 1 ether);
+        vm.prank(client);
+        manager.disputeTask(slashTaskId);
+
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_UNAVAILABLE);
+        uint256 unavailableTaskId =
+            _createTask(keccak256("non-canonical-unavailable"), block.timestamp + 1 days, 1 ether);
+        vm.prank(client);
+        manager.disputeTask(unavailableTaskId);
+
+        // Both status and knownness lookup paths fail under forceRevert.
+        // Non-canonical policies must still route deterministically without knownness scanning.
+        validation.setForceRevert(true);
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(slashTaskId);
+        AgentBondManager.Task memory slashTask = manager.getTask(slashTaskId);
+        assertTrue(slashTask.status == AgentBondManager.TaskStatus.Slashed);
+        assertEq(manager.registryFailureSince(slashTaskId), 0);
+
+        manager.reclaimDisputedTask(unavailableTaskId);
+        AgentBondManager.Task memory unavailableTask = manager.getTask(unavailableTaskId);
+        assertTrue(unavailableTask.status == AgentBondManager.TaskStatus.Disputed);
+        assertGt(manager.registryFailureSince(unavailableTaskId), 0);
+    }
+
+    function test_reclaimDisputedTask_canonicalFailureUnsupportedStateIsCached() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("unsupported-request-state"), block.timestamp + 1 days, 1 ether);
+
+        // Canonical cache cannot be populated if getAgentValidations reverts, so we record unsupported.
+        validation.setForceRevert(true);
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setForceStatusRevert(true, "status read failed");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        // First reclaim: records first failure and stays disputed.
+        manager.reclaimDisputedTask(taskId);
+        assertGt(manager.registryFailureSince(taskId), 0);
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Disputed);
+
+        // If reclaim rescans request-knowwness, this mutable override should force slash.
+        bytes32[] memory emptySet = new bytes32[](0);
+        validation.setAgentValidationsOverride(agentId, emptySet);
+        validation.setForceRevert(false);
+
+        vm.warp(block.timestamp + 3 days + 1);
+        manager.reclaimDisputedTask(taskId);
+
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Refunded);
+    }
+
+    function test_reclaimDisputedTask_canonicalFailureExceedsScanCapIsUnsupported() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("scan-cap-request"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+
+        bytes32[] memory requestHashes = new bytes32[](513);
+        for (uint256 i; i < requestHashes.length; i++) {
+            requestHashes[i] = keccak256(abi.encode(i));
+        }
+        requestHashes[requestHashes.length - 1] = reqHash;
+        validation.setAgentValidationsOverride(agentId, requestHashes);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setForceStatusRevert(true, "status read failed");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Disputed);
+        assertGt(manager.registryFailureSince(taskId), 0);
+
+        vm.warp(block.timestamp + 3 days + 1);
+        manager.reclaimDisputedTask(taskId);
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Refunded);
+    }
+
+    function test_reclaimDisputedTask_statusPolicySnapshottedAtDispute() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_UNAVAILABLE);
+        uint256 taskId = _createTask(keccak256("status-policy-snapshot"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_MISSING);
+        validation.setForceStatusRevert(true, "status-read-failure");
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+
+        assertGt(manager.registryFailureSince(taskId), 0);
+        assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Disputed);
     }
 
     /// @dev If a validator responded, reclaim must fail (H2 fix).
@@ -495,7 +1037,7 @@ contract AgentBondManagerTest is Test {
 
     // --- Scorer Tests ---
 
-    function test_noReputation_requiresFullBond() public {
+    function test_noReputation_requiresFullBond() public view {
         assertEq(scorer.getRequiredBond(agentId, 1 ether), 1 ether);
     }
 
@@ -571,7 +1113,7 @@ contract AgentBondManagerTest is Test {
         assertEq(count, 0);
     }
 
-    function test_scorer_noData_zeroScore() public {
+    function test_scorer_noData_zeroScore() public view {
         (uint256 score, uint64 count) = scorer.getScore(agentId);
         assertEq(score, 0);
         assertEq(count, 0);
@@ -646,7 +1188,7 @@ contract AgentBondManagerTest is Test {
         validation.setValidation(req1, validator, agentId, 80, true);
         manager.resolveDispute(id1);
 
-        vm.expectRevert(AgentBondManager.AgentMismatch.selector);
+        vm.expectRevert(AgentBondManager.NoValidationResponse.selector);
         manager.resolveDispute(id2);
 
         assertTrue(manager.getTask(id2).status == AgentBondManager.TaskStatus.Disputed);
@@ -730,6 +1272,32 @@ contract AgentBondManagerTest is Test {
         assertEq(manager.registryFailureGracePeriod(), 0);
     }
 
+    function test_setValidationFinalityPolicy_acceptsValues() public {
+        manager.setValidationFinalityPolicy(FINALITY_POLICY_ANY_STATUS_RECORD);
+        assertEq(uint8(manager.validationFinalityPolicy()), FINALITY_POLICY_ANY_STATUS_RECORD);
+        manager.setValidationFinalityPolicy(FINALITY_POLICY_RESPONSE_HASH_REQUIRED);
+        assertEq(uint8(manager.validationFinalityPolicy()), FINALITY_POLICY_RESPONSE_HASH_REQUIRED);
+    }
+
+    function test_setValidationFinalityPolicy_rejectsInvalid() public {
+        vm.expectRevert(AgentBondManager.InvalidParameter.selector);
+        manager.setValidationFinalityPolicy(2);
+    }
+
+    function test_setStatusLookupFailurePolicy_acceptsValues() public {
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_CANONICAL_UNKNOWN_AS_MISSING);
+        assertEq(uint8(manager.statusLookupFailurePolicy()), STATUS_LOOKUP_POLICY_CANONICAL_UNKNOWN_AS_MISSING);
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_MISSING);
+        assertEq(uint8(manager.statusLookupFailurePolicy()), STATUS_LOOKUP_POLICY_ALWAYS_MISSING);
+        manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_UNAVAILABLE);
+        assertEq(uint8(manager.statusLookupFailurePolicy()), STATUS_LOOKUP_POLICY_ALWAYS_UNAVAILABLE);
+    }
+
+    function test_setStatusLookupFailurePolicy_rejectsInvalid() public {
+        vm.expectRevert(AgentBondManager.InvalidParameter.selector);
+        manager.setStatusLookupFailurePolicy(3);
+    }
+
     // --- P1: Unbounded reviewer set removal ---
 
     function test_scorer_noTrustedReviewers_returnsZero() public {
@@ -754,6 +1322,27 @@ contract AgentBondManagerTest is Test {
         assertEq(score, 0);
         assertEq(count, 1);
         assertEq(scorer.getRequiredBond(agentId, 1 ether), 1 ether);
+    }
+
+    function test_scorer_hugeMaxExpectedValue_doesNotRevert() public {
+        ReputationScorer scorerImpl = new ReputationScorer();
+        ERC1967Proxy scorerProxy = new ERC1967Proxy(
+            address(scorerImpl),
+            abi.encodeCall(
+                ReputationScorer.initialize, (address(reputation), address(validation), "starred", type(uint256).max)
+            )
+        );
+        ReputationScorer overflowScorer = ReputationScorer(address(scorerProxy));
+
+        address reviewer = makeAddr("reviewer-huge-max");
+        reputation.setFeedback(agentId, reviewer, 1, 0, "starred", "");
+        reputation.setSummaryDecimals(agentId, 18);
+        overflowScorer.addTrustedReviewer(reviewer);
+
+        (uint256 score, uint64 count) = overflowScorer.getScore(agentId);
+        assertEq(score, 0);
+        assertEq(count, 1);
+        assertEq(overflowScorer.getRequiredBond(agentId, 1 ether), 1 ether);
     }
 
     // --- P2b: Mismatched agentId liveness lock ---
@@ -791,6 +1380,41 @@ contract AgentBondManagerTest is Test {
 
         vm.expectRevert(AgentBondManager.AgentMismatch.selector);
         manager.resolveDispute(taskId);
+    }
+
+    function test_resolveDispute_revertsOnValidatorMismatch() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("validator-mismatch-resolve"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, makeAddr("other-validator"), agentId, 80, true);
+
+        vm.expectRevert(AgentBondManager.ValidatorMismatch.selector);
+        manager.resolveDispute(taskId);
+    }
+
+    function test_reclaimDisputedTask_slashesWhenValidatorMismatched() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        uint256 taskId = _createTask(keccak256("validator-mismatch-reclaim"), block.timestamp + 1 days, 1 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, makeAddr("other-validator"), agentId, 80, true);
+
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
     }
 
     // --- P3: Zero-address ownership transfer ---
@@ -838,6 +1462,8 @@ contract AgentBondManagerTest is Test {
         manager.depositBond{value: 10 ether}(agentId);
 
         uint256 taskId = _createTask(keccak256("grace"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
 
         vm.prank(client);
         manager.disputeTask(taskId);
@@ -856,6 +1482,8 @@ contract AgentBondManagerTest is Test {
         manager.depositBond{value: 10 ether}(agentId);
 
         uint256 taskId = _createTask(keccak256("grace2"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
 
         vm.prank(client);
         manager.disputeTask(taskId);
@@ -875,6 +1503,8 @@ contract AgentBondManagerTest is Test {
         manager.depositBond{value: 10 ether}(agentId);
 
         uint256 taskId = _createTask(keccak256("grace3"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
 
         vm.prank(client);
         manager.disputeTask(taskId);
@@ -885,6 +1515,8 @@ contract AgentBondManagerTest is Test {
         manager.reclaimDisputedTask(taskId);
 
         vm.warp(block.timestamp + 3 days);
+        vm.expectEmit(true, true, false, false, address(manager));
+        emit DisputeRefundedNoRegistry(taskId, client);
         manager.reclaimDisputedTask(taskId);
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
@@ -896,11 +1528,43 @@ contract AgentBondManagerTest is Test {
         assertEq(bondLocked, 0);
     }
 
+    function test_reclaimDisputedTask_registryFailure_refundsCustomClientRecipientAfterGrace() public {
+        vm.prank(agentOwner);
+        manager.depositBond{value: 10 ether}(agentId);
+
+        address clientRecipient_ = makeAddr("client-refund-recipient");
+        uint256 taskId = _createTaskWithRecipients(
+            keccak256("grace-custom-recipient"), block.timestamp + 1 days, 1 ether, agentOwner, clientRecipient_
+        );
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
+
+        vm.prank(client);
+        manager.disputeTask(taskId);
+
+        validation.setForceRevert(true);
+        vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
+
+        manager.reclaimDisputedTask(taskId);
+
+        vm.warp(block.timestamp + 3 days);
+        vm.expectEmit(true, true, false, false, address(manager));
+        emit DisputeRefundedNoRegistry(taskId, clientRecipient_);
+        manager.reclaimDisputedTask(taskId);
+
+        AgentBondManager.Task memory task = manager.getTask(taskId);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
+        assertEq(manager.claimable(clientRecipient_), 1 ether);
+        assertEq(manager.claimable(client), 0);
+    }
+
     function test_reclaimDisputedTask_registryRecovers_slashesNormally() public {
         vm.prank(agentOwner);
         manager.depositBond{value: 10 ether}(agentId);
 
         uint256 taskId = _createTask(keccak256("grace4"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
 
         vm.prank(client);
         manager.disputeTask(taskId);
@@ -922,6 +1586,8 @@ contract AgentBondManagerTest is Test {
         manager.depositBond{value: 10 ether}(agentId);
 
         uint256 taskId = _createTask(keccak256("snap-grace"), block.timestamp + 1 days, 1 ether);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, false);
 
         vm.prank(client);
         manager.disputeTask(taskId);

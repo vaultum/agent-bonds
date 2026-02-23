@@ -196,7 +196,9 @@ contract ReputationScorer is IReputationScorer, Initializable, UUPSUpgradeable {
 
             uint256 raw = uint256(uint128(avg));
             if (decimals > 18) return (0, n);
-            uint256 denom = maxExpectedValue * (10 ** uint256(decimals));
+            uint256 scale = 10 ** uint256(decimals);
+            if (maxExpectedValue > type(uint256).max / scale) return (0, n);
+            uint256 denom = maxExpectedValue * scale;
             score = (raw * MAX_SCORE) / denom;
             if (score > MAX_SCORE) score = MAX_SCORE;
         } catch {

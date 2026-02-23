@@ -113,6 +113,20 @@ contract PostDeploymentSmokeTest is Script {
         uint256 rgp = manager.registryFailureGracePeriod();
         _check("Manager: registryFailureGracePeriod", string.concat(vm.toString(rgp), "s"), rgp <= 90 days);
 
+        uint256 finalityPolicy = uint256(manager.validationFinalityPolicy());
+        _check(
+            "Manager: validationFinalityPolicy",
+            vm.toString(finalityPolicy),
+            finalityPolicy <= 1 && finalityPolicy == _policyFromEnv("VALIDATION_FINALITY_POLICY")
+        );
+
+        uint256 failurePolicy = uint256(manager.statusLookupFailurePolicy());
+        _check(
+            "Manager: statusLookupFailurePolicy",
+            vm.toString(failurePolicy),
+            failurePolicy <= 2 && failurePolicy == _policyFromEnv("STATUS_LOOKUP_FAILURE_POLICY")
+        );
+
         console2.log("");
     }
 
@@ -148,6 +162,18 @@ contract PostDeploymentSmokeTest is Script {
             return v;
         } catch {
             return address(0);
+        }
+    }
+
+    function _policyFromEnv(string memory key) private view returns (uint256) {
+        try vm.envString(key) returns (string memory raw) {
+            try vm.parseUint(raw) returns (uint256 value) {
+                return value;
+            } catch {
+                revert(string.concat(key, " must be a valid uint256"));
+            }
+        } catch {
+            return 0;
         }
     }
 
