@@ -10,13 +10,15 @@ import {ReputationScorer} from "../src/ReputationScorer.sol";
 /// @author Vaultum
 /// @notice Deploys ReputationScorer and AgentBondManager behind ERC-1967 proxies.
 contract Deploy is Script {
+    uint256 private constant MIN_DISPUTE_PERIOD = 1 hours;
+
     struct DeployConfig {
         address deployer;
         address identityRegistry;
-        address reputationRegistry;
         address validationRegistry;
-        string reputationTag;
-        uint256 maxExpectedValue;
+        address settlementToken;
+        uint256 scorerPriorValue;
+        uint256 scorerSlashMultiplierBps;
         uint256 disputePeriod;
         uint8 minPassingScore;
         uint256 slashBps;
@@ -56,12 +58,7 @@ contract Deploy is Script {
                 d.scorerImpl,
                 abi.encodeCall(
                     ReputationScorer.initialize,
-                    (
-                        config.reputationRegistry,
-                        config.validationRegistry,
-                        config.reputationTag,
-                        config.maxExpectedValue
-                    )
+                    (config.scorerPriorValue, config.scorerSlashMultiplierBps)
                 )
             )
         );
@@ -79,6 +76,7 @@ contract Deploy is Script {
                         config.identityRegistry,
                         config.validationRegistry,
                         d.scorerProxy,
+                        config.settlementToken,
                         config.disputePeriod,
                         config.minPassingScore,
                         config.slashBps
@@ -88,9 +86,16 @@ contract Deploy is Script {
         );
         console2.log("AgentBondManager proxy:", d.managerProxy);
 
-        AgentBondManager manager = AgentBondManager(payable(d.managerProxy));
-        manager.setValidationFinalityPolicy(config.validationFinalityPolicy);
-        manager.setStatusLookupFailurePolicy(config.statusLookupFailurePolicy);
+        ReputationScorer scorer = ReputationScorer(d.scorerProxy);
+        scorer.setBondManager(d.managerProxy);
+
+        AgentBondManager manager = AgentBondManager(d.managerProxy);
+        if (uint8(manager.validationFinalityPolicy()) != config.validationFinalityPolicy) {
+            manager.setValidationFinalityPolicy(config.validationFinalityPolicy);
+        }
+        if (uint8(manager.statusLookupFailurePolicy()) != config.statusLookupFailurePolicy) {
+            manager.setStatusLookupFailurePolicy(config.statusLookupFailurePolicy);
+        }
 
         vm.stopBroadcast();
 
@@ -101,10 +106,13 @@ contract Deploy is Script {
     function _loadConfig() private view returns (DeployConfig memory c) {
         c.deployer = vm.envAddress("DEPLOYER_ADDRESS");
         c.identityRegistry = vm.envAddress("IDENTITY_REGISTRY");
-        c.reputationRegistry = vm.envAddress("REPUTATION_REGISTRY");
         c.validationRegistry = vm.envAddress("VALIDATION_REGISTRY");
-        c.reputationTag = vm.envString("REPUTATION_TAG");
-        c.maxExpectedValue = vm.envUint("MAX_EXPECTED_VALUE");
+        c.settlementToken = vm.envAddress("SETTLEMENT_TOKEN");
+        c.scorerPriorValue = _envUintOrDefault("SCORER_PRIOR_VALUE", 0);
+        if (c.scorerPriorValue == 0) {
+            c.scorerPriorValue = vm.envUint("SCORER_PRIOR_VALUE_WEI");
+        }
+        c.scorerSlashMultiplierBps = vm.envUint("SCORER_SLASH_MULTIPLIER_BPS");
         c.disputePeriod = vm.envUint("DISPUTE_PERIOD");
         uint256 rawValidationFinalityPolicy = _envUintOrDefault(
             "VALIDATION_FINALITY_POLICY",
@@ -134,12 +142,15 @@ contract Deploy is Script {
     function _validateConfig(DeployConfig memory c) private view {
         if (c.deployer == address(0)) revert("DEPLOYER_ADDRESS is zero");
         if (c.identityRegistry == address(0)) revert("IDENTITY_REGISTRY is zero");
-        if (c.reputationRegistry == address(0)) revert("REPUTATION_REGISTRY is zero");
         if (c.validationRegistry == address(0)) revert("VALIDATION_REGISTRY is zero");
-        if (bytes(c.reputationTag).length == 0) revert("REPUTATION_TAG is empty");
-        if (c.maxExpectedValue == 0) revert("MAX_EXPECTED_VALUE is zero");
+        if (c.settlementToken == address(0)) revert("SETTLEMENT_TOKEN is zero");
+        if (c.scorerPriorValue == 0) revert("SCORER_PRIOR_VALUE is zero");
+        if (c.scorerSlashMultiplierBps < 10_000 || c.scorerSlashMultiplierBps > 100_000) {
+            revert("SCORER_SLASH_MULTIPLIER_BPS out of range [10000,100000]");
+        }
         if (c.minPassingScore == 0 || c.minPassingScore > 100) revert("MIN_PASSING_SCORE out of range [1,100]");
         if (c.slashBps > 10_000) revert("SLASH_BPS exceeds 10000");
+        if (c.disputePeriod < MIN_DISPUTE_PERIOD) revert("DISPUTE_PERIOD below minimum");
         if (c.disputePeriod > 90 days) revert("DISPUTE_PERIOD exceeds 90 days");
         if (c.validationFinalityPolicy > uint8(AgentBondManager.ValidationFinalityPolicy.AnyStatusRecord)) {
             revert("VALIDATION_FINALITY_POLICY out of range");
@@ -149,7 +160,6 @@ contract Deploy is Script {
         }
 
         if (c.identityRegistry.code.length == 0) revert("IDENTITY_REGISTRY has no code");
-        if (c.reputationRegistry.code.length == 0) revert("REPUTATION_REGISTRY has no code");
         if (c.validationRegistry.code.length == 0) revert("VALIDATION_REGISTRY has no code");
     }
 
@@ -163,10 +173,10 @@ contract Deploy is Script {
         json = vm.serializeAddress(key, "managerImplementation", d.managerImpl);
         json = vm.serializeAddress(key, "managerProxy", d.managerProxy);
         json = vm.serializeAddress(key, "identityRegistry", c.identityRegistry);
-        json = vm.serializeAddress(key, "reputationRegistry", c.reputationRegistry);
         json = vm.serializeAddress(key, "validationRegistry", c.validationRegistry);
-        json = vm.serializeString(key, "reputationTag", c.reputationTag);
-        json = vm.serializeUint(key, "maxExpectedValue", c.maxExpectedValue);
+        json = vm.serializeAddress(key, "settlementToken", c.settlementToken);
+        json = vm.serializeUint(key, "scorerPriorValue", c.scorerPriorValue);
+        json = vm.serializeUint(key, "scorerSlashMultiplierBps", c.scorerSlashMultiplierBps);
         json = vm.serializeUint(key, "disputePeriod", c.disputePeriod);
         json = vm.serializeUint(key, "minPassingScore", uint256(c.minPassingScore));
         json = vm.serializeUint(key, "slashBps", c.slashBps);
@@ -181,8 +191,10 @@ contract Deploy is Script {
     function _logConfig(DeployConfig memory c) private pure {
         console2.log("Deployer:", c.deployer);
         console2.log("Identity Registry:", c.identityRegistry);
-        console2.log("Reputation Registry:", c.reputationRegistry);
         console2.log("Validation Registry:", c.validationRegistry);
+        console2.log("Settlement Token:", c.settlementToken);
+        console2.log("Scorer prior value:", c.scorerPriorValue);
+        console2.log("Scorer slash multiplier (bps):", c.scorerSlashMultiplierBps);
         console2.log("Dispute Period:", c.disputePeriod);
         console2.log("Min Passing Score:", uint256(c.minPassingScore));
         console2.log("Slash BPS:", c.slashBps);

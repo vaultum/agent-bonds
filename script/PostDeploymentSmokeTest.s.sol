@@ -59,21 +59,17 @@ contract PostDeploymentSmokeTest is Script {
         address owner = scorer.owner();
         _check("Scorer: owner set", vm.toString(owner), owner != address(0));
 
-        address repRegistry = address(scorer.REPUTATION_REGISTRY());
-        _check("Scorer: reputation registry", vm.toString(repRegistry), repRegistry != address(0));
+        address bondManager = address(scorer.BOND_MANAGER());
+        _check("Scorer: bond manager set", vm.toString(bondManager), bondManager != address(0));
 
-        address valRegistry = address(scorer.VALIDATION_REGISTRY());
-        _check("Scorer: validation registry", vm.toString(valRegistry), valRegistry != address(0));
+        uint256 priorValue = scorer.priorValue();
+        _check("Scorer: prior value", vm.toString(priorValue), priorValue > 0);
 
-        uint256 maxVal = scorer.maxExpectedValue();
-        _check("Scorer: maxExpectedValue", vm.toString(maxVal), maxVal > 0);
-
-        uint256 repW = scorer.reputationWeight();
-        uint256 valW = scorer.validationWeight();
+        uint256 slashMultiplierBps = scorer.slashMultiplierBps();
         _check(
-            "Scorer: weights each <= 10000",
-            string.concat(vm.toString(repW), " + ", vm.toString(valW)),
-            repW <= 10_000 && valW <= 10_000
+            "Scorer: slash multiplier in range",
+            vm.toString(slashMultiplierBps),
+            slashMultiplierBps >= 10_000 && slashMultiplierBps <= 100_000
         );
 
         console2.log("");
@@ -87,7 +83,7 @@ contract PostDeploymentSmokeTest is Script {
         address impl = _getImplementation(proxy);
         _check("Manager: impl has code", vm.toString(impl), impl != address(0) && impl.code.length > 0);
 
-        AgentBondManager manager = AgentBondManager(payable(proxy));
+        AgentBondManager manager = AgentBondManager(proxy);
 
         address owner = manager.owner();
         _check("Manager: owner set", vm.toString(owner), owner != address(0));
@@ -100,6 +96,12 @@ contract PostDeploymentSmokeTest is Script {
 
         address scorer = address(manager.SCORER());
         _check("Manager: scorer matches", vm.toString(scorer), scorer == expectedScorer);
+
+        address settlementToken = address(manager.settlementToken());
+        _check("Manager: settlement token set", vm.toString(settlementToken), settlementToken != address(0));
+
+        address scorerBondManager = address(ReputationScorer(expectedScorer).BOND_MANAGER());
+        _check("Scorer: points to manager", vm.toString(scorerBondManager), scorerBondManager == proxy);
 
         uint256 dp = manager.disputePeriod();
         _check("Manager: disputePeriod", string.concat(vm.toString(dp), "s"), dp > 0 && dp <= 90 days);

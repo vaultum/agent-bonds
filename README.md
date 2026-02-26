@@ -1,14 +1,14 @@
 # Agent Bonds
 
-Reputation-collateralized bonding protocol for [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) AI agents. Agents stake ETH as a quality signal; bond requirements scale inversely with on-chain reputation. Disputes resolve through the ERC-8004 Validation Registry with economic consequences.
+Reputation-collateralized bonding protocol for [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) AI agents. Agents stake settlement tokens as a quality signal; bond requirements scale with an on-chain outcome score derived from completed vs slashed task history. Disputes resolve through the ERC-8004 Validation Registry with economic consequences.
 
 ## Why
 
-ERC-8004 provides identity, reputation, and validation registries for autonomous agents -- but intentionally leaves economic incentives out of scope. Agent Bonds fills that gap:
+ERC-8004 provides identity and validation rails for autonomous agents -- but intentionally leaves economic incentives out of scope. Agent Bonds fills that gap:
 
-- Agents post collateral proportional to their reputation (high rep = lower bond)
+- Agents post collateral proportional to on-chain outcomes (more successful delivery = lower bond)
 - Clients get economic guarantees -- disputed work triggers validation and automatic slashing
-- Reputation feedback loop -- completed tasks build reputation, lowering future bond costs
+- Outcome feedback loop -- successful settlements improve score, slashing worsens score
 - Sybil resistance -- each agent identity requires real capital at stake
 
 ## Contracts
@@ -16,7 +16,7 @@ ERC-8004 provides identity, reputation, and validation registries for autonomous
 | Contract | Description |
 |---|---|
 | `AgentBondManager.sol` | Bond deposits, task lifecycle, dispute resolution, pull payments. UUPS upgradeable. |
-| `ReputationScorer.sol` | Combines Reputation + Validation registry data into a normalized score. Maps score to bond requirement. UUPS upgradeable. |
+| `ReputationScorer.sol` | Minimal on-chain scorer from AgentBondManager outcome counters. Maps score to bond requirement. UUPS upgradeable. |
 | `IReputationScorer.sol` | Composable scoring interface any protocol can implement. |
 
 ## Task Lifecycle
@@ -40,9 +40,9 @@ All payouts use pull-payments via `claim()`.
 
 - **Agent consent**: Tasks require EIP-712 signature (supports EOA and ERC-1271 smart wallets)
 - **Parameter snapshots**: `minPassingScore`, `slashBps`, `disputePeriod`, `registryGracePeriod`, and validation policy modes are captured per-task at creation/dispute time -- admin changes don't affect in-flight tasks
-- **Bounded admin controls**: Dispute period capped at 90 days, slash basis points at 10,000, scoring weights at 10,000, trusted lists at 200 entries
+- **Bounded admin controls**: Dispute period capped at 90 days, slash basis points at 10,000, scorer slash multiplier bounded at deployment
 - **Registry failure handling**: Grace window prevents immediate slashing during validation registry outages
-- **Upgrade-safe task decoding**: Recipient fields are appended in `Task`; zero-recipient legacy tasks fall back to legacy payout/hash behavior
+- **Task-scoped validator commitment**: Each task binds a single `committedValidator`; only that validator's response can resolve disputes
 - **Pull payments**: Eliminates stuck-task risk from reverting recipients
 - **Reentrancy protection**: Transient storage lock on all state-mutating external functions
 
@@ -88,10 +88,9 @@ cp .env.example .env
 |---|---|
 | `DEPLOYER_ADDRESS` | Deployer EOA |
 | `IDENTITY_REGISTRY` | ERC-8004 Identity Registry |
-| `REPUTATION_REGISTRY` | ERC-8004 Reputation Registry |
 | `VALIDATION_REGISTRY` | ERC-8004 Validation Registry |
-| `REPUTATION_TAG` | Tag to filter reputation feedback (e.g. `"starred"`) |
-| `MAX_EXPECTED_VALUE` | Max expected feedback value for scoring normalization |
+| `SCORER_PRIOR_VALUE` | Prior value dampener for outcome scoring |
+| `SCORER_SLASH_MULTIPLIER_BPS` | Slash severity multiplier used by scorer (10000-100000) |
 | `DISPUTE_PERIOD` | Dispute window in seconds (max 90 days) |
 | `MIN_PASSING_SCORE` | Minimum validation score to pass dispute (1-100) |
 | `SLASH_BPS` | Slash percentage in basis points (max 10000) |

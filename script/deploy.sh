@@ -36,10 +36,10 @@ Signing:
 Environment Variables:
     DEPLOYER_ADDRESS          Sender address (required for Ledger, auto-derived for keystore)
     IDENTITY_REGISTRY         ERC-8004 Identity Registry address
-    REPUTATION_REGISTRY       ERC-8004 Reputation Registry address
     VALIDATION_REGISTRY       ERC-8004 Validation Registry address
-    REPUTATION_TAG            Tag to filter reputation feedback
-    MAX_EXPECTED_VALUE        Max expected feedback value
+    SETTLEMENT_TOKEN          ERC-20 settlement token address (non-zero)
+    SCORER_PRIOR_VALUE        Prior value dampener for on-chain scoring
+    SCORER_SLASH_MULTIPLIER_BPS  Slash severity multiplier (10000-100000)
     DISPUTE_PERIOD            Dispute window in seconds (max 90 days)
     MIN_PASSING_SCORE         Minimum validation score (1-100)
     SLASH_BPS                 Slash percentage in basis points (max 10000)

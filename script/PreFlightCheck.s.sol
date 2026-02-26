@@ -9,6 +9,7 @@ import {Script, console2} from "forge-std/Script.sol";
 /// @dev Run: forge script script/PreFlightCheck.s.sol --rpc-url $RPC_URL
 contract PreFlightCheck is Script {
     uint256 private constant MIN_DEPLOYER_BALANCE = 0.05 ether;
+    uint256 private constant MIN_DISPUTE_PERIOD = 1 hours;
 
     struct CheckResult {
         bool passed;
@@ -26,6 +27,7 @@ contract PreFlightCheck is Script {
 
         _checkDeployer();
         _checkRegistries();
+        _checkSettlementToken();
         _checkScorerParams();
         _checkManagerParams();
         _checkPolicyParams();
@@ -71,22 +73,42 @@ contract PreFlightCheck is Script {
         console2.log("Checking ERC-8004 registries...");
 
         _checkAddressWithCode("IDENTITY_REGISTRY");
-        _checkAddressWithCode("REPUTATION_REGISTRY");
         _checkAddressWithCode("VALIDATION_REGISTRY");
 
+        console2.log("");
+    }
+
+    function _checkSettlementToken() private {
+        console2.log("Checking settlement token...");
+        _checkAddressWithCode("SETTLEMENT_TOKEN");
         console2.log("");
     }
 
     function _checkScorerParams() private {
         console2.log("Checking ReputationScorer params...");
 
-        _checkNonEmptyString("REPUTATION_TAG");
-
-        uint256 maxVal = _envUint("MAX_EXPECTED_VALUE");
-        if (maxVal == 0) {
-            _record(false, "MAX_EXPECTED_VALUE: MISSING or zero");
+        uint256 priorValue = _envUint("SCORER_PRIOR_VALUE");
+        if (priorValue == 0) {
+            priorValue = _envUint("SCORER_PRIOR_VALUE_WEI");
+        }
+        if (priorValue == 0) {
+            _record(false, "SCORER_PRIOR_VALUE: MISSING or zero");
         } else {
-            _record(true, string.concat("MAX_EXPECTED_VALUE: ", vm.toString(maxVal)));
+            _record(true, string.concat("SCORER_PRIOR_VALUE: ", vm.toString(priorValue)));
+        }
+
+        uint256 slashMultiplierBps = _envUint("SCORER_SLASH_MULTIPLIER_BPS");
+        if (slashMultiplierBps < 10_000 || slashMultiplierBps > 100_000) {
+            _record(
+                false,
+                string.concat(
+                    "SCORER_SLASH_MULTIPLIER_BPS: ",
+                    vm.toString(slashMultiplierBps),
+                    " (must be 10000-100000)"
+                )
+            );
+        } else {
+            _record(true, string.concat("SCORER_SLASH_MULTIPLIER_BPS: ", vm.toString(slashMultiplierBps)));
         }
 
         console2.log("");
@@ -97,7 +119,14 @@ contract PreFlightCheck is Script {
 
         uint256 dp = _envUint("DISPUTE_PERIOD");
         if (dp == 0) {
-            _record(false, "DISPUTE_PERIOD: MISSING or zero");
+            _record(false, "DISPUTE_PERIOD: MISSING");
+        } else if (dp < MIN_DISPUTE_PERIOD) {
+            _record(
+                false,
+                string.concat(
+                    "DISPUTE_PERIOD: ", vm.toString(dp), " below minimum ", vm.toString(MIN_DISPUTE_PERIOD)
+                )
+            );
         } else if (dp > 90 days) {
             _record(false, string.concat("DISPUTE_PERIOD: ", vm.toString(dp), " exceeds 90 days"));
         } else {
@@ -189,18 +218,6 @@ contract PreFlightCheck is Script {
             _record(false, string.concat(key, ": ", vm.toString(addr), " (no code)"));
         } else {
             _record(true, string.concat(key, ": ", vm.toString(addr)));
-        }
-    }
-
-    function _checkNonEmptyString(string memory key) private {
-        try vm.envString(key) returns (string memory val) {
-            if (bytes(val).length == 0) {
-                _record(false, string.concat(key, ": SET but empty"));
-            } else {
-                _record(true, string.concat(key, ": ", val));
-            }
-        } catch {
-            _record(false, string.concat(key, ": MISSING"));
         }
     }
 
