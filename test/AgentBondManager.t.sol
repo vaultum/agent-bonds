@@ -18,9 +18,10 @@ contract AgentBondManagerTest is Test {
     AgentBondManager manager;
 
     uint256 internal constant AGENT_OWNER_PK = 0xA11CE;
+    uint256 internal constant CLIENT_PK = 0xC1E17;
     uint256 internal constant VALIDATOR_PK = 0xB0B;
     address internal agentOwner;
-    address client = makeAddr("client");
+    address internal client;
     address validator;
     uint256 agentId;
 
@@ -44,12 +45,15 @@ contract AgentBondManagerTest is Test {
     bytes32 private constant VALIDATOR_COMMITMENT_TYPEHASH = keccak256(
         "ValidatorCommitment(uint256 agentId,address client,bytes32 taskHash,uint256 feeAmount,uint256 deadline,uint256 nonce)"
     );
+    bytes32 private constant EIP3009_TRANSFER_WITH_AUTHORIZATION_TYPEHASH =
+        keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)");
 
     event DisputeExpiredClaimed(uint256 indexed taskId, address indexed beneficiary);
     event DisputeRefundedNoRegistry(uint256 indexed taskId, address indexed beneficiary);
 
     function setUp() public {
         agentOwner = vm.addr(AGENT_OWNER_PK);
+        client = vm.addr(CLIENT_PK);
         validator = vm.addr(VALIDATOR_PK);
 
         identity = new MockIdentityRegistry();
@@ -151,6 +155,24 @@ contract AgentBondManagerTest is Test {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(VALIDATOR_PK, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    function _signEip3009Authorization(
+        uint256 signerPk,
+        address from,
+        address to,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce
+    ) internal view returns (uint8 v, bytes32 r, bytes32 s) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                EIP3009_TRANSFER_WITH_AUTHORIZATION_TYPEHASH, from, to, value, validAfter, validBefore, nonce
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", settlementToken.DOMAIN_SEPARATOR(), structHash));
+        return vm.sign(signerPk, digest);
     }
 
     function _createTask(bytes32 taskHash, uint256 deadline, uint256 payment) internal returns (uint256) {
@@ -255,6 +277,18 @@ contract AgentBondManagerTest is Test {
         manager.depositBond(agentId, 10 ether);
     }
 
+    function test_depositBond_rejectsAuthorizedOperatorWhenNotOwner() public {
+        address operator = makeAddr("authorized-operator");
+        settlementToken.mint(operator, 10 ether);
+        vm.prank(operator);
+        settlementToken.approve(address(manager), type(uint256).max);
+        identity.setOperator(agentId, operator, true);
+
+        vm.prank(operator);
+        vm.expectRevert(AgentBondManager.NotAgentOwner.selector);
+        manager.depositBond(agentId, 1 ether);
+    }
+
     function test_depositBond_revertsForZeroValue() public {
         vm.prank(agentOwner);
         vm.expectRevert(AgentBondManager.ZeroValue.selector);
@@ -281,21 +315,41 @@ contract AgentBondManagerTest is Test {
 
     function test_depositBondWithEip3009() public {
         uint256 amount = 10 ether;
+        uint256 validAfter = block.timestamp - 1;
+        uint256 validBefore = block.timestamp + 1 days;
+        bytes32 nonce = keccak256("deposit-eip3009");
+        (uint8 v, bytes32 r, bytes32 s) = _signEip3009Authorization(
+            AGENT_OWNER_PK, agentOwner, address(manager), amount, validAfter, validBefore, nonce
+        );
         vm.prank(agentOwner);
         manager.depositBondWithEip3009(
             agentId,
             amount,
-            block.timestamp - 1,
-            block.timestamp + 1 days,
-            keccak256("deposit-eip3009"),
-            27,
-            bytes32(uint256(1)),
-            bytes32(uint256(2))
+            validAfter,
+            validBefore,
+            nonce,
+            v,
+            r,
+            s
         );
 
         (uint256 bondedAmount, uint256 locked) = manager.getBond(agentId);
         assertEq(bondedAmount, amount);
         assertEq(locked, 0);
+    }
+
+    function test_depositBondWithEip3009_revertsForInvalidAuthorizationSignature() public {
+        uint256 amount = 10 ether;
+        uint256 validAfter = block.timestamp - 1;
+        uint256 validBefore = block.timestamp + 1 days;
+        bytes32 nonce = keccak256("deposit-eip3009-invalid-sig");
+        (uint8 v, bytes32 r, bytes32 s) = _signEip3009Authorization(
+            0xDEAD, agentOwner, address(manager), amount, validAfter, validBefore, nonce
+        );
+
+        vm.prank(agentOwner);
+        vm.expectRevert(bytes("invalid_signature"));
+        manager.depositBondWithEip3009(agentId, amount, validAfter, validBefore, nonce, v, r, s);
     }
 
     function test_withdrawBond() public {
@@ -786,6 +840,12 @@ contract AgentBondManagerTest is Test {
         bytes memory validatorSig = _signValidatorCommitment(
             agentId, client, taskHash, validatorFeeAmount, deadline, manager.validatorNonces(validator)
         );
+        uint256 validAfter = block.timestamp - 1;
+        uint256 validBefore = block.timestamp + 1 days;
+        bytes32 eip3009Nonce = keccak256("create-task-eip3009");
+        (uint8 v, bytes32 r, bytes32 s) = _signEip3009Authorization(
+            CLIENT_PK, client, address(manager), paymentAmount, validAfter, validBefore, eip3009Nonce
+        );
 
         vm.prank(client);
         uint256 taskId = manager.createTaskWithEip3009(
@@ -800,12 +860,12 @@ contract AgentBondManagerTest is Test {
             validatorFeeAmount,
             validatorSig,
             sig,
-            block.timestamp - 1,
-            block.timestamp + 1 days,
-            keccak256("create-task-eip3009"),
-            27,
-            bytes32(uint256(3)),
-            bytes32(uint256(4))
+            validAfter,
+            validBefore,
+            eip3009Nonce,
+            v,
+            r,
+            s
         );
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
@@ -875,17 +935,23 @@ contract AgentBondManagerTest is Test {
             validator,
             validatorFeeAmount
         );
+        uint256 validAfter = block.timestamp - 1;
+        uint256 validBefore = block.timestamp + 1 days;
+        bytes32 eip3009Nonce = keccak256("dispute-task-eip3009");
+        (uint8 v, bytes32 r, bytes32 s) = _signEip3009Authorization(
+            CLIENT_PK, client, address(manager), validatorFeeAmount, validAfter, validBefore, eip3009Nonce
+        );
 
         vm.prank(client);
         manager.disputeTaskWithEip3009(
             taskId,
             validatorFeeAmount,
-            block.timestamp - 1,
-            block.timestamp + 1 days,
-            keccak256("dispute-task-eip3009"),
-            27,
-            bytes32(uint256(5)),
-            bytes32(uint256(6))
+            validAfter,
+            validBefore,
+            eip3009Nonce,
+            v,
+            r,
+            s
         );
 
         assertEq(manager.validatorFeeEscrow(taskId), validatorFeeAmount);

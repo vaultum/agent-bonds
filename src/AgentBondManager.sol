@@ -327,6 +327,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
 
     // --- Core ---
 
+    /// @notice Bond principal is agent-owned; only the current identity owner can deposit.
     function depositBond(uint256 agentId, uint256 amount) external nonReentrant {
         _validateDeposit(msg.sender, agentId, amount);
         _pullPayment(msg.sender, amount);
@@ -759,9 +760,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     function agentTaskIds(uint256 agentId) external view returns (uint256[] memory) {
-        uint256 historyCount = _agentTaskHistoryCount[agentId];
-        uint256 historyStart = _effectiveTaskHistoryStart(_agentTaskHistoryStart[agentId], historyCount);
-        uint256 historyLen = historyCount > historyStart ? historyCount - historyStart : 0;
+        (uint256 historyStart, uint256 historyLen) = _taskHistoryWindow(agentId);
         uint256[] memory ids = new uint256[](historyLen);
         for (uint256 i; i < historyLen; i++) {
             ids[i] = _agentTaskHistory[agentId][historyStart + i];
@@ -779,9 +778,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
             return new uint256[](0);
         }
 
-        uint256 historyCount = _agentTaskHistoryCount[agentId];
-        uint256 historyStart = _effectiveTaskHistoryStart(_agentTaskHistoryStart[agentId], historyCount);
-        uint256 historyLen = historyCount > historyStart ? historyCount - historyStart : 0;
+        (uint256 historyStart, uint256 historyLen) = _taskHistoryWindow(agentId);
         if (offset >= historyLen) {
             return new uint256[](0);
         }
@@ -927,7 +924,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
 
     function _validateDeposit(address depositor, uint256 agentId, uint256 amount) internal view {
         if (amount == 0) revert ZeroValue();
-        if (!IDENTITY_REGISTRY.isAuthorizedOrOwner(depositor, agentId)) revert NotAgentOwner();
+        if (IDENTITY_REGISTRY.ownerOf(agentId) != depositor) revert NotAgentOwner();
     }
 
     function _recordDeposit(uint256 agentId, address depositor, uint256 amount) internal {
@@ -1297,6 +1294,12 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
 
         uint256 minStart = historyCount - maxAgentTaskHistory;
         return historyStart > minStart ? historyStart : minStart;
+    }
+
+    function _taskHistoryWindow(uint256 agentId) internal view returns (uint256 historyStart, uint256 historyLen) {
+        uint256 historyCount = _agentTaskHistoryCount[agentId];
+        historyStart = _effectiveTaskHistoryStart(_agentTaskHistoryStart[agentId], historyCount);
+        historyLen = historyCount > historyStart ? historyCount - historyStart : 0;
     }
 
     function _requireTrustedCommittedValidator(address committedValidator_) internal view {
