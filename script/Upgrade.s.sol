@@ -49,6 +49,45 @@ contract Upgrade is Script {
         console2.log("===========================================");
     }
 
+    function validateOnly() external view {
+        address deployer = vm.envAddress("DEPLOYER_ADDRESS");
+        string memory target = vm.envString("TARGET");
+        address proxy = _resolveProxy(target);
+
+        if (proxy == address(0)) revert("Proxy address not found");
+        if (proxy.code.length == 0) revert("No code at proxy address");
+
+        address currentImpl = _getImplementation(proxy);
+        if (currentImpl == address(0) || currentImpl.code.length == 0) {
+            revert("Current implementation invalid");
+        }
+
+        address owner = _ownerOf(proxy);
+        if (owner != deployer) {
+            revert("DEPLOYER_ADDRESS is not proxy owner");
+        }
+
+        address provided = _envAddress("NEW_IMPLEMENTATION");
+        console2.log("===========================================");
+        console2.log("  Agent Bonds Upgrade Preflight");
+        console2.log("===========================================");
+        console2.log("Target:", target);
+        console2.log("Proxy:", proxy);
+        console2.log("Proxy owner:", owner);
+        console2.log("Current impl:", currentImpl);
+
+        if (provided != address(0)) {
+            if (provided.code.length == 0) revert("NEW_IMPLEMENTATION has no code");
+            if (provided == currentImpl) revert("Already on this implementation");
+            console2.log("New impl override:", provided);
+        } else {
+            console2.log("NEW_IMPLEMENTATION not set (script will deploy a fresh implementation)");
+        }
+
+        console2.log("Preflight complete.");
+        console2.log("===========================================");
+    }
+
     function _resolveProxy(string memory target) private view returns (address) {
         bytes32 t = keccak256(bytes(target));
 
@@ -96,6 +135,12 @@ contract Upgrade is Script {
 
     function _getImplementation(address proxy) private view returns (address impl) {
         impl = address(uint160(uint256(vm.load(proxy, ERC1967_IMPLEMENTATION_SLOT))));
+    }
+
+    function _ownerOf(address target) private view returns (address owner) {
+        (bool ok, bytes memory data) = target.staticcall(abi.encodeWithSignature("owner()"));
+        if (!ok || data.length < 32) revert("owner() probe failed");
+        owner = abi.decode(data, (address));
     }
 
     function _loadFromArtifacts(string memory key) private view returns (address) {

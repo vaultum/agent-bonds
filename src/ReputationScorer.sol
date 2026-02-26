@@ -87,22 +87,14 @@ contract ReputationScorer is IReputationScorer, Initializable, UUPSUpgradeable {
         IAgentBondManagerOutcomes bondManager = BOND_MANAGER;
         if (address(bondManager) == address(0)) revert BondManagerNotConfigured();
 
-        (
-            uint256 successValue,
-            uint256 slashValue,
-            uint64 successCount,
-            uint64 slashCount,
-            ,
-            
-        ) = bondManager.getAgentOutcomeTotals(agentId);
+        (uint256 successValue, uint256 slashValue, uint64 successCount, uint64 slashCount,,) =
+            bondManager.getAgentOutcomeTotals(agentId);
 
         evidenceCount = successCount + slashCount;
         if (evidenceCount == 0) return (0, 0);
 
         uint256 slashPenalty = (slashValue * slashMultiplierBps) / SLASH_MULTIPLIER_BPS_BASE;
         uint256 denominator = successValue + slashPenalty + priorValue;
-        if (denominator == 0) return (0, evidenceCount);
-
         score = (successValue * MAX_SCORE) / denominator;
         if (score > MAX_SCORE) {
             score = MAX_SCORE;

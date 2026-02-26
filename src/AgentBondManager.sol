@@ -403,8 +403,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
             committedValidator_,
             validatorFeeAmount
         );
-        _validateCreateTask(input);
-        _verifyCreateTaskSignatures(input, msg.sender, validatorSig, agentSig);
+        _prepareCreateTask(input, msg.sender, validatorSig, agentSig);
         _pullPayment(msg.sender, input.paymentAmount);
         return _recordTask(msg.sender, input);
     }
@@ -438,8 +437,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
             committedValidator_,
             validatorFeeAmount
         );
-        _validateCreateTask(input);
-        _verifyCreateTaskSignatures(input, msg.sender, validatorSig, agentSig);
+        _prepareCreateTask(input, msg.sender, validatorSig, agentSig);
         _pullPaymentWithPermit2(
             msg.sender,
             input.paymentAmount,
@@ -482,8 +480,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
             committedValidator_,
             validatorFeeAmount
         );
-        _validateCreateTask(input);
-        _verifyCreateTaskSignatures(input, msg.sender, validatorSig, agentSig);
+        _prepareCreateTask(input, msg.sender, validatorSig, agentSig);
         _pullPaymentWithEip3009(msg.sender, input.paymentAmount, validAfter, validBefore, nonce, v, r, s);
         return _recordTask(msg.sender, input);
     }
@@ -972,6 +969,16 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
             input.deadline,
             validatorSig
         );
+    }
+
+    function _prepareCreateTask(
+        CreateTaskInput memory input,
+        address client_,
+        bytes calldata validatorSig,
+        bytes calldata agentSig
+    ) internal {
+        _validateCreateTask(input);
+        _verifyCreateTaskSignatures(input, client_, validatorSig, agentSig);
     }
 
     function _buildCreateTaskInput(

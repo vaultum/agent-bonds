@@ -138,6 +138,33 @@ get_rpc_url() {
     esac
 }
 
+get_chain_id() {
+    local network="$1"
+    case "$network" in
+        sepolia)      echo "11155111" ;;
+        base-sepolia) echo "84532" ;;
+        op-sepolia)   echo "11155420" ;;
+        mainnet)      echo "1" ;;
+        base)         echo "8453" ;;
+        *)            error "Unknown network: $network" ;;
+    esac
+}
+
+verify_rpc_chain() {
+    local network="$1"
+    local rpc_url="$2"
+    local expected_chain_id
+    expected_chain_id="$(get_chain_id "$network")"
+
+    local actual_chain_id
+    actual_chain_id="$(cast chain-id --rpc-url "$rpc_url" 2>/dev/null || true)"
+    [[ -z "$actual_chain_id" ]] && error "Failed to read chain ID from RPC for $network"
+
+    if [[ "$actual_chain_id" != "$expected_chain_id" ]]; then
+        error "RPC chain ID mismatch for $network: expected $expected_chain_id, got $actual_chain_id"
+    fi
+}
+
 ensure_deployments_dir() {
     mkdir -p "$DEPLOYMENTS_DIR"
     mkdir -p "$DEPLOYMENTS_DIR/dry-runs"
@@ -149,6 +176,7 @@ cmd_preflight() {
     rpc_url=$(get_rpc_url "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
+    verify_rpc_chain "$network" "$rpc_url"
 
     if [[ "$SIGNER_MODE" == "keystore" ]]; then
         resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
@@ -168,6 +196,7 @@ cmd_dry_run() {
     rpc_url=$(get_rpc_url "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
+    verify_rpc_chain "$network" "$rpc_url"
 
     ensure_deployments_dir
 
@@ -206,6 +235,7 @@ cmd_deploy() {
     rpc_url=$(get_rpc_url "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
+    verify_rpc_chain "$network" "$rpc_url"
 
     log "Running pre-flight checks first..."
     cmd_preflight "$network"
@@ -246,6 +276,7 @@ cmd_smoke_test() {
     rpc_url=$(get_rpc_url "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
+    verify_rpc_chain "$network" "$rpc_url"
 
     log "Running post-deployment smoke tests for $network..."
 
@@ -263,6 +294,19 @@ cmd_upgrade() {
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
     [[ -z "$target" ]] && error "--target required (manager or scorer)"
+    verify_rpc_chain "$network" "$rpc_url"
+
+    # For keystore mode, derive DEPLOYER_ADDRESS before Solidity preflight reads env.
+    if [[ "$SIGNER_MODE" == "keystore" ]]; then
+        resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
+    fi
+
+    log "Running upgrade preflight checks..."
+    TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
+        --root "$PROJECT_ROOT" \
+        --rpc-url "$rpc_url" \
+        --sig "validateOnly()" \
+        -vvv
 
     if [[ "$network" == "mainnet" ]]; then
         echo ""
@@ -276,7 +320,9 @@ cmd_upgrade() {
 
     log "Upgrading $target on $network..."
 
-    resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
+    if [[ "$SIGNER_MODE" != "keystore" ]]; then
+        resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
+    fi
 
     TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
         --root "$PROJECT_ROOT" \

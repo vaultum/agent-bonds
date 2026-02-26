@@ -116,17 +116,37 @@ contract PostDeploymentSmokeTest is Script {
         _check("Manager: registryFailureGracePeriod", string.concat(vm.toString(rgp), "s"), rgp <= 90 days);
 
         uint256 finalityPolicy = uint256(manager.validationFinalityPolicy());
+        (bool hasValidationFinalityPolicy, uint256 expectedValidationFinalityPolicy) =
+            _policyFromEnvOptional("VALIDATION_FINALITY_POLICY");
+        bool finalityPolicyMatches =
+            finalityPolicy <= 1
+                && (!hasValidationFinalityPolicy || finalityPolicy == expectedValidationFinalityPolicy);
         _check(
             "Manager: validationFinalityPolicy",
-            vm.toString(finalityPolicy),
-            finalityPolicy <= 1 && finalityPolicy == _policyFromEnv("VALIDATION_FINALITY_POLICY")
+            hasValidationFinalityPolicy
+                ? string.concat(
+                    vm.toString(finalityPolicy),
+                    " (expected ",
+                    vm.toString(expectedValidationFinalityPolicy),
+                    ")"
+                )
+                : vm.toString(finalityPolicy),
+            finalityPolicyMatches
         );
 
         uint256 failurePolicy = uint256(manager.statusLookupFailurePolicy());
+        (bool hasFailurePolicy, uint256 expectedFailurePolicy) =
+            _policyFromEnvOptional("STATUS_LOOKUP_FAILURE_POLICY");
+        bool failurePolicyMatches =
+            failurePolicy <= 2 && (!hasFailurePolicy || failurePolicy == expectedFailurePolicy);
         _check(
             "Manager: statusLookupFailurePolicy",
-            vm.toString(failurePolicy),
-            failurePolicy <= 2 && failurePolicy == _policyFromEnv("STATUS_LOOKUP_FAILURE_POLICY")
+            hasFailurePolicy
+                ? string.concat(
+                    vm.toString(failurePolicy), " (expected ", vm.toString(expectedFailurePolicy), ")"
+                )
+                : vm.toString(failurePolicy),
+            failurePolicyMatches
         );
 
         console2.log("");
@@ -167,16 +187,29 @@ contract PostDeploymentSmokeTest is Script {
         }
     }
 
-    function _policyFromEnv(string memory key) private view returns (uint256) {
+    function _policyFromEnvOptional(string memory key) private view returns (bool hasValue, uint256 value) {
         try vm.envString(key) returns (string memory raw) {
-            try vm.parseUint(raw) returns (uint256 value) {
-                return value;
+            if (_isBlank(raw)) return (false, 0);
+            try vm.parseUint(raw) returns (uint256 parsedValue) {
+                return (true, parsedValue);
             } catch {
                 revert(string.concat(key, " must be a valid uint256"));
             }
         } catch {
-            return 0;
+            return (false, 0);
         }
+    }
+
+    function _isBlank(string memory value) private pure returns (bool) {
+        bytes memory data = bytes(value);
+        if (data.length == 0) return true;
+        for (uint256 i = 0; i < data.length; i++) {
+            bytes1 c = data[i];
+            if (c != 0x20 && c != 0x09 && c != 0x0A && c != 0x0D) {
+                return false;
+            }
+        }
+        return true;
     }
 
     function _parseAddress(string memory json, string memory key) private pure returns (address) {

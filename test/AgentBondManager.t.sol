@@ -37,7 +37,7 @@ contract AgentBondManagerTest is Test {
     uint8 constant STATUS_LOOKUP_POLICY_ALWAYS_UNAVAILABLE = 2;
     uint8 constant VALIDATOR_SELECTION_POLICY_DESIGNATED_ONLY = 0;
     uint8 constant VALIDATOR_SELECTION_POLICY_DESIGNATED_AND_ALLOWLISTED = 1;
-    uint256 constant DEFAULT_VALIDATOR_FEE_WEI = 0;
+    uint256 constant DEFAULT_VALIDATOR_FEE_AMOUNT = 0;
 
     bytes32 private constant TASK_PERMIT_TYPEHASH = keccak256(
         "TaskPermit(uint256 agentId,address client,address agentRecipient,address clientRecipient,address committedValidator,uint256 validatorFeeAmount,uint256 paymentAmount,uint256 deadline,bytes32 taskHash,uint256 nonce)"
@@ -113,7 +113,7 @@ contract AgentBondManagerTest is Test {
         address agentRecipient_,
         address clientRecipient_,
         address committedValidator_,
-        uint256 validatorFeeWei_,
+        uint256 validatorFeeAmount_,
         uint256 payment,
         uint256 deadline,
         bytes32 taskHash_,
@@ -127,7 +127,7 @@ contract AgentBondManagerTest is Test {
                 agentRecipient_,
                 clientRecipient_,
                 committedValidator_,
-                validatorFeeWei_,
+                validatorFeeAmount_,
                 payment,
                 deadline,
                 taskHash_,
@@ -143,13 +143,13 @@ contract AgentBondManagerTest is Test {
         uint256 agentId_,
         address client_,
         bytes32 taskHash_,
-        uint256 validatorFeeWei_,
+        uint256 validatorFeeAmount_,
         uint256 deadline,
         uint256 nonce
     ) internal view returns (bytes memory) {
         bytes32 structHash = keccak256(
             abi.encode(
-                VALIDATOR_COMMITMENT_TYPEHASH, agentId_, client_, taskHash_, validatorFeeWei_, deadline, nonce
+                VALIDATOR_COMMITMENT_TYPEHASH, agentId_, client_, taskHash_, validatorFeeAmount_, deadline, nonce
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), structHash));
@@ -206,7 +206,7 @@ contract AgentBondManagerTest is Test {
             agentRecipient_,
             clientRecipient_,
             committedValidator_,
-            DEFAULT_VALIDATOR_FEE_WEI
+            DEFAULT_VALIDATOR_FEE_AMOUNT
         );
     }
 
@@ -217,7 +217,7 @@ contract AgentBondManagerTest is Test {
         address agentRecipient_,
         address clientRecipient_,
         address committedValidator_,
-        uint256 validatorFeeWei
+        uint256 validatorFeeAmount
     ) internal returns (uint256) {
         uint256 nonce = manager.agentNonces(agentId);
         uint256 validatorNonce = manager.validatorNonces(committedValidator_);
@@ -227,14 +227,14 @@ contract AgentBondManagerTest is Test {
             agentRecipient_,
             clientRecipient_,
             committedValidator_,
-            validatorFeeWei,
+            validatorFeeAmount,
             payment,
             deadline,
             taskHash,
             nonce
         );
         bytes memory validatorSig =
-            _signValidatorCommitment(agentId, client, taskHash, validatorFeeWei, deadline, validatorNonce);
+            _signValidatorCommitment(agentId, client, taskHash, validatorFeeAmount, deadline, validatorNonce);
         vm.prank(client);
         return manager.createTask(
             agentId,
@@ -245,7 +245,7 @@ contract AgentBondManagerTest is Test {
             agentRecipient_,
             clientRecipient_,
             committedValidator_,
-            validatorFeeWei,
+            validatorFeeAmount,
             validatorSig,
             sig
         );
@@ -422,7 +422,7 @@ contract AgentBondManagerTest is Test {
 
         bytes32 taskHash = keccak256("recipient-mismatch");
         uint256 deadline = block.timestamp + 1 days;
-        uint256 validatorFeeWei = DEFAULT_VALIDATOR_FEE_WEI;
+        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_AMOUNT;
         uint256 nonce = manager.agentNonces(agentId);
         bytes memory sig = _signPermit(
             agentId,
@@ -430,14 +430,14 @@ contract AgentBondManagerTest is Test {
             permittedAgentRecipient,
             permittedClientRecipient,
             validator,
-            validatorFeeWei,
+            validatorFeeAmount,
             1 ether,
             deadline,
             taskHash,
             nonce
         );
         bytes memory validatorSig =
-            _signValidatorCommitment(agentId, client, taskHash, validatorFeeWei, deadline, manager.validatorNonces(validator));
+            _signValidatorCommitment(agentId, client, taskHash, validatorFeeAmount, deadline, manager.validatorNonces(validator));
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.InvalidSignature.selector);
@@ -450,7 +450,7 @@ contract AgentBondManagerTest is Test {
             permittedAgentRecipient,
             makeAddr("different-client-recipient"),
             validator,
-            validatorFeeWei,
+            validatorFeeAmount,
             validatorSig,
             sig
         );
@@ -463,7 +463,7 @@ contract AgentBondManagerTest is Test {
         // Sign with wrong private key
         bytes32 taskHash = keccak256("task");
         uint256 deadline = block.timestamp + 1 days;
-        uint256 validatorFeeWei = DEFAULT_VALIDATOR_FEE_WEI;
+        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_AMOUNT;
         uint256 nonce = manager.agentNonces(agentId);
         bytes32 structHash = keccak256(
             abi.encode(
@@ -473,7 +473,7 @@ contract AgentBondManagerTest is Test {
                 agentOwner,
                 client,
                 validator,
-                validatorFeeWei,
+                validatorFeeAmount,
                 1 ether,
                 deadline,
                 taskHash,
@@ -484,7 +484,7 @@ contract AgentBondManagerTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(0xDEAD, digest);
         bytes memory badSig = abi.encodePacked(r, s, v);
         bytes memory validatorSig =
-            _signValidatorCommitment(agentId, client, taskHash, validatorFeeWei, deadline, manager.validatorNonces(validator));
+            _signValidatorCommitment(agentId, client, taskHash, validatorFeeAmount, deadline, manager.validatorNonces(validator));
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.InvalidSignature.selector);
@@ -497,7 +497,7 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             validator,
-            validatorFeeWei,
+            validatorFeeAmount,
             validatorSig,
             badSig
         );
@@ -520,7 +520,7 @@ contract AgentBondManagerTest is Test {
             address(0),
             client,
             validator,
-            DEFAULT_VALIDATOR_FEE_WEI,
+            DEFAULT_VALIDATOR_FEE_AMOUNT,
             hex"",
             hex""
         );
@@ -537,7 +537,7 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             address(0),
-            DEFAULT_VALIDATOR_FEE_WEI,
+            DEFAULT_VALIDATOR_FEE_AMOUNT,
             1 ether,
             block.timestamp + 1 days,
             keccak256("zero-validator"),
@@ -555,7 +555,7 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             address(0),
-            DEFAULT_VALIDATOR_FEE_WEI,
+            DEFAULT_VALIDATOR_FEE_AMOUNT,
             hex"",
             sig
         );
@@ -619,20 +619,20 @@ contract AgentBondManagerTest is Test {
     }
 
     function test_createTask_revertsIfInsufficientBond() public {
-        uint256 validatorFeeWei = DEFAULT_VALIDATOR_FEE_WEI;
+        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_AMOUNT;
         uint256 deadline = block.timestamp + 1 days;
         bytes32 taskHash = keccak256("task");
         uint256 nonce = manager.agentNonces(agentId);
         bytes memory sig = _signPermit(
-            agentId, client, agentOwner, client, validator, validatorFeeWei, 1 ether, deadline, taskHash, nonce
+            agentId, client, agentOwner, client, validator, validatorFeeAmount, 1 ether, deadline, taskHash, nonce
         );
         bytes memory validatorSig =
-            _signValidatorCommitment(agentId, client, taskHash, validatorFeeWei, deadline, manager.validatorNonces(validator));
+            _signValidatorCommitment(agentId, client, taskHash, validatorFeeAmount, deadline, manager.validatorNonces(validator));
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.InsufficientBond.selector);
         manager.createTask(
-            agentId, taskHash, deadline, 1 ether, agentOwner, agentOwner, client, validator, validatorFeeWei, validatorSig, sig
+            agentId, taskHash, deadline, 1 ether, agentOwner, agentOwner, client, validator, validatorFeeAmount, validatorSig, sig
         );
     }
 
@@ -647,7 +647,7 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             validator,
-            DEFAULT_VALIDATOR_FEE_WEI,
+            DEFAULT_VALIDATOR_FEE_AMOUNT,
             1 ether,
             block.timestamp - 1,
             keccak256("task"),
@@ -665,7 +665,7 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             validator,
-            DEFAULT_VALIDATOR_FEE_WEI,
+            DEFAULT_VALIDATOR_FEE_AMOUNT,
             hex"",
             sig
         );
@@ -679,18 +679,18 @@ contract AgentBondManagerTest is Test {
 
         bytes32 taskHash = keccak256("validator-fee-too-low");
         uint256 deadline = block.timestamp + 1 days;
-        uint256 validatorFeeWei = 1_000_000;
+        uint256 validatorFeeAmount = 1_000_000;
         uint256 nonce = manager.agentNonces(agentId);
         uint256 validatorNonce = manager.validatorNonces(validator);
         bytes memory sig =
-            _signPermit(agentId, client, agentOwner, client, validator, validatorFeeWei, 1 ether, deadline, taskHash, nonce);
+            _signPermit(agentId, client, agentOwner, client, validator, validatorFeeAmount, 1 ether, deadline, taskHash, nonce);
         bytes memory validatorSig =
-            _signValidatorCommitment(agentId, client, taskHash, validatorFeeWei, deadline, validatorNonce);
+            _signValidatorCommitment(agentId, client, taskHash, validatorFeeAmount, deadline, validatorNonce);
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.ValidatorFeeBelowMinimum.selector);
         manager.createTask(
-            agentId, taskHash, deadline, 1 ether, agentOwner, agentOwner, client, validator, validatorFeeWei, validatorSig, sig
+            agentId, taskHash, deadline, 1 ether, agentOwner, agentOwner, client, validator, validatorFeeAmount, validatorSig, sig
         );
     }
 
@@ -702,18 +702,18 @@ contract AgentBondManagerTest is Test {
 
         bytes32 taskHash = keccak256("untrusted-allowlisted-policy");
         uint256 deadline = block.timestamp + 1 days;
-        uint256 validatorFeeWei = DEFAULT_VALIDATOR_FEE_WEI;
+        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_AMOUNT;
         uint256 nonce = manager.agentNonces(agentId);
         uint256 validatorNonce = manager.validatorNonces(validator);
         bytes memory sig =
-            _signPermit(agentId, client, agentOwner, client, validator, validatorFeeWei, 1 ether, deadline, taskHash, nonce);
+            _signPermit(agentId, client, agentOwner, client, validator, validatorFeeAmount, 1 ether, deadline, taskHash, nonce);
         bytes memory validatorSig =
-            _signValidatorCommitment(agentId, client, taskHash, validatorFeeWei, deadline, validatorNonce);
+            _signValidatorCommitment(agentId, client, taskHash, validatorFeeAmount, deadline, validatorNonce);
 
         vm.prank(client);
         vm.expectRevert(AgentBondManager.ValidatorNotTrusted.selector);
         manager.createTask(
-            agentId, taskHash, deadline, 1 ether, agentOwner, agentOwner, client, validator, validatorFeeWei, validatorSig, sig
+            agentId, taskHash, deadline, 1 ether, agentOwner, agentOwner, client, validator, validatorFeeAmount, validatorSig, sig
         );
     }
 
@@ -734,15 +734,15 @@ contract AgentBondManagerTest is Test {
 
         bytes32 taskHash = keccak256("validator-sig-invalid");
         uint256 deadline = block.timestamp + 1 days;
-        uint256 validatorFeeWei = 0.01 ether;
+        uint256 validatorFeeAmount = 0.01 ether;
         uint256 nonce = manager.agentNonces(agentId);
         uint256 validatorNonce = manager.validatorNonces(validator);
         bytes memory sig =
-            _signPermit(agentId, client, agentOwner, client, validator, validatorFeeWei, 1 ether, deadline, taskHash, nonce);
+            _signPermit(agentId, client, agentOwner, client, validator, validatorFeeAmount, 1 ether, deadline, taskHash, nonce);
 
         bytes32 validatorStructHash = keccak256(
             abi.encode(
-                VALIDATOR_COMMITMENT_TYPEHASH, agentId, client, taskHash, validatorFeeWei, deadline, validatorNonce
+                VALIDATOR_COMMITMENT_TYPEHASH, agentId, client, taskHash, validatorFeeAmount, deadline, validatorNonce
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", manager.domainSeparator(), validatorStructHash));
@@ -760,7 +760,7 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             validator,
-            validatorFeeWei,
+            validatorFeeAmount,
             badValidatorSig,
             sig
         );
@@ -773,7 +773,7 @@ contract AgentBondManagerTest is Test {
         bytes32 taskHash = keccak256("task-with-permit2");
         uint256 deadline = block.timestamp + 1 days;
         uint256 paymentAmount = 1 ether;
-        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_WEI;
+        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_AMOUNT;
 
         bytes memory sig = _signPermit(
             agentId,
@@ -823,7 +823,7 @@ contract AgentBondManagerTest is Test {
         bytes32 taskHash = keccak256("task-with-eip3009");
         uint256 deadline = block.timestamp + 1 days;
         uint256 paymentAmount = 1 ether;
-        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_WEI;
+        uint256 validatorFeeAmount = DEFAULT_VALIDATOR_FEE_AMOUNT;
 
         bytes memory sig = _signPermit(
             agentId,
@@ -961,7 +961,7 @@ contract AgentBondManagerTest is Test {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
 
-        uint256 validatorFeeWei = 0.01 ether;
+        uint256 validatorFeeAmount = 0.01 ether;
         uint256 taskId = _createTaskWithRecipientsValidatorAndFee(
             keccak256("validator-fee-payout"),
             block.timestamp + 1 days,
@@ -969,27 +969,27 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             validator,
-            validatorFeeWei
+            validatorFeeAmount
         );
-        assertEq(manager.validatorFeeCommitment(taskId), validatorFeeWei);
+        assertEq(manager.validatorFeeCommitment(taskId), validatorFeeAmount);
 
         vm.prank(client);
-        manager.disputeTask(taskId, validatorFeeWei);
-        assertEq(manager.validatorFeeEscrow(taskId), validatorFeeWei);
+        manager.disputeTask(taskId, validatorFeeAmount);
+        assertEq(manager.validatorFeeEscrow(taskId), validatorFeeAmount);
 
         bytes32 reqHash = manager.requestHash(taskId);
         validation.setValidation(reqHash, validator, agentId, 80, true);
 
         manager.resolveDispute(taskId);
         assertEq(manager.validatorFeeEscrow(taskId), 0);
-        assertEq(manager.claimable(validator), validatorFeeWei);
+        assertEq(manager.claimable(validator), validatorFeeAmount);
     }
 
     function test_reclaimDisputedTask_refundsValidatorFeeToClient() public {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
 
-        uint256 validatorFeeWei = 0.02 ether;
+        uint256 validatorFeeAmount = 0.02 ether;
         uint256 taskId = _createTaskWithRecipientsValidatorAndFee(
             keccak256("validator-fee-refund"),
             block.timestamp + 1 days,
@@ -997,18 +997,18 @@ contract AgentBondManagerTest is Test {
             agentOwner,
             client,
             validator,
-            validatorFeeWei
+            validatorFeeAmount
         );
 
         vm.prank(client);
-        manager.disputeTask(taskId, validatorFeeWei);
+        manager.disputeTask(taskId, validatorFeeAmount);
 
         vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
         manager.reclaimDisputedTask(taskId);
 
         uint256 expectedSlash = (1 ether * SLASH_BPS) / 10_000;
         assertEq(manager.validatorFeeEscrow(taskId), 0);
-        assertEq(manager.claimable(client), 1 ether + expectedSlash + validatorFeeWei);
+        assertEq(manager.claimable(client), 1 ether + expectedSlash + validatorFeeAmount);
     }
 
     // --- Complete Task Tests ---
