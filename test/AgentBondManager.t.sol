@@ -20,9 +20,11 @@ contract AgentBondManagerTest is Test {
     uint256 internal constant AGENT_OWNER_PK = 0xA11CE;
     uint256 internal constant CLIENT_PK = 0xC1E17;
     uint256 internal constant VALIDATOR_PK = 0xB0B;
+    uint256 internal constant INSURER_PK = 0x1A51CE;
     address internal agentOwner;
     address internal client;
     address validator;
+    address insurer;
     uint256 agentId;
 
     uint256 constant DISPUTE_PERIOD = 7 days;
@@ -55,6 +57,7 @@ contract AgentBondManagerTest is Test {
         agentOwner = vm.addr(AGENT_OWNER_PK);
         client = vm.addr(CLIENT_PK);
         validator = vm.addr(VALIDATOR_PK);
+        insurer = vm.addr(INSURER_PK);
 
         identity = new MockIdentityRegistry();
         validation = new MockValidationRegistry();
@@ -90,16 +93,22 @@ contract AgentBondManagerTest is Test {
         manager = AgentBondManager(address(managerProxy));
         scorer.setBondManager(address(manager));
         manager.setPermit2(address(permit2));
+        manager.addTrustedInsurer(insurer);
 
         uint256 mintAmount = 100_000 ether;
         settlementToken.mint(agentOwner, mintAmount);
         settlementToken.mint(client, mintAmount);
+        settlementToken.mint(insurer, mintAmount);
 
         vm.startPrank(agentOwner);
         settlementToken.approve(address(manager), type(uint256).max);
         settlementToken.approve(address(permit2), type(uint256).max);
         vm.stopPrank();
         vm.startPrank(client);
+        settlementToken.approve(address(manager), type(uint256).max);
+        settlementToken.approve(address(permit2), type(uint256).max);
+        vm.stopPrank();
+        vm.startPrank(insurer);
         settlementToken.approve(address(manager), type(uint256).max);
         settlementToken.approve(address(permit2), type(uint256).max);
         vm.stopPrank();
@@ -260,6 +269,17 @@ contract AgentBondManagerTest is Test {
         return (successValue * 10_000) / denominator;
     }
 
+    function _assertBondInvariants(uint256 targetAgentId) internal view {
+        (uint256 amount, uint256 locked, uint256 insured, address insurer_) = manager.bonds(targetAgentId);
+        assertLe(locked, amount, "locked must not exceed total amount");
+        assertLe(insured, amount, "insured must not exceed total amount");
+        if (insured == 0) {
+            assertEq(insurer_, address(0), "insurer must be zero when insured is zero");
+        } else {
+            assertTrue(insurer_ != address(0), "insurer must be set when insured > 0");
+        }
+    }
+
     // --- Bond Tests ---
 
     function test_depositBond() public {
@@ -375,6 +395,244 @@ contract AgentBondManagerTest is Test {
         vm.prank(agentOwner);
         vm.expectRevert(AgentBondManager.InsufficientBond.selector);
         manager.withdrawBond(agentId, 10 ether);
+    }
+
+    function test_depositBondFor() public {
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 7 ether);
+
+        (uint256 amount, uint256 locked, uint256 insured, address insurerAddress) = manager.bonds(agentId);
+        assertEq(amount, 7 ether);
+        assertEq(locked, 0);
+        assertEq(insured, 7 ether);
+        assertEq(insurerAddress, insurer);
+        assertEq(manager.insuredBond(agentId), 7 ether);
+        assertEq(manager.insuredAvailableBond(agentId), 7 ether);
+        assertEq(manager.selfFundedAvailableBond(agentId), 0);
+    }
+
+    function test_depositBondFor_revertsForUntrustedInsurer() public {
+        address untrustedInsurer = makeAddr("untrusted-insurer");
+        settlementToken.mint(untrustedInsurer, 10 ether);
+        vm.prank(untrustedInsurer);
+        settlementToken.approve(address(manager), type(uint256).max);
+
+        vm.prank(untrustedInsurer);
+        vm.expectRevert(AgentBondManager.InsurerNotTrusted.selector);
+        manager.depositBondFor(agentId, 1 ether);
+    }
+
+    function test_withdrawInsuredBond() public {
+        vm.prank(agentOwner);
+        manager.depositBond(agentId, 5 ether);
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 4 ether);
+
+        uint256 insurerBalanceBefore = settlementToken.balanceOf(insurer);
+        vm.prank(insurer);
+        manager.withdrawInsuredBond(agentId, 3 ether);
+
+        (uint256 amount, uint256 locked, uint256 insured, address insurerAddress) = manager.bonds(agentId);
+        assertEq(amount, 6 ether);
+        assertEq(locked, 0);
+        assertEq(insured, 1 ether);
+        assertEq(insurerAddress, insurer);
+        assertEq(settlementToken.balanceOf(insurer), insurerBalanceBefore + 3 ether);
+    }
+
+    function test_agentCannotWithdrawInsured() public {
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 5 ether);
+
+        vm.prank(agentOwner);
+        vm.expectRevert(AgentBondManager.InsufficientBond.selector);
+        manager.withdrawBond(agentId, 1 ether);
+    }
+
+    function test_proportionalSlashAccounting() public {
+        vm.prank(agentOwner);
+        manager.depositBond(agentId, 6 ether);
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 4 ether);
+
+        uint256 taskId = _createTask(keccak256("insurer-proportional-slash"), block.timestamp + 1 days, 2 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskId, 0);
+
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, true);
+        manager.resolveDispute(taskId);
+
+        uint256 slashAmount = (2 ether * SLASH_BPS) / 10_000;
+        uint256 expectedInsuredSlash = (slashAmount * 4 ether) / 10 ether;
+
+        (uint256 amount, uint256 locked, uint256 insured,) = manager.bonds(agentId);
+        assertEq(amount, 10 ether - slashAmount);
+        assertEq(locked, 0);
+        assertEq(insured, 4 ether - expectedInsuredSlash);
+        _assertBondInvariants(agentId);
+    }
+
+    function test_insurerResetOnZero() public {
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 2 ether);
+        vm.prank(insurer);
+        manager.withdrawInsuredBond(agentId, 2 ether);
+
+        (uint256 amount, uint256 locked, uint256 insured, address insurerAddress) = manager.bonds(agentId);
+        assertEq(amount, 0);
+        assertEq(locked, 0);
+        assertEq(insured, 0);
+        assertEq(insurerAddress, address(0));
+    }
+
+    function test_insurerMismatch() public {
+        address insurerTwo = makeAddr("insurer-two");
+        settlementToken.mint(insurerTwo, 10 ether);
+        vm.prank(insurerTwo);
+        settlementToken.approve(address(manager), type(uint256).max);
+        manager.addTrustedInsurer(insurerTwo);
+
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 1 ether);
+
+        vm.prank(insurerTwo);
+        vm.expectRevert(AgentBondManager.InsurerMismatch.selector);
+        manager.depositBondFor(agentId, 1 ether);
+    }
+
+    function test_addTrustedInsurer_onlyOwner() public {
+        address insurerTwo = makeAddr("insurer-two-owner-check");
+        vm.prank(agentOwner);
+        vm.expectRevert(AgentBondManager.NotOwner.selector);
+        manager.addTrustedInsurer(insurerTwo);
+    }
+
+    function test_invariantsHoldAfterMutations() public {
+        vm.prank(agentOwner);
+        manager.depositBond(agentId, 6 ether);
+        _assertBondInvariants(agentId);
+
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 4 ether);
+        _assertBondInvariants(agentId);
+
+        uint256 taskA = _createTask(keccak256("invariants-a"), block.timestamp + 1 days, 2 ether);
+        _assertBondInvariants(agentId);
+
+        vm.prank(client);
+        manager.completeTask(taskA);
+        _assertBondInvariants(agentId);
+
+        uint256 taskB = _createTask(keccak256("invariants-b"), block.timestamp + 1 days, 2 ether);
+        vm.prank(client);
+        manager.disputeTask(taskB, 0);
+        bytes32 reqHash = manager.requestHash(taskB);
+        validation.setValidation(reqHash, validator, agentId, 0, true);
+        manager.resolveDispute(taskB);
+        _assertBondInvariants(agentId);
+
+        vm.prank(agentOwner);
+        manager.withdrawBond(agentId, 1 ether);
+        _assertBondInvariants(agentId);
+
+        vm.prank(insurer);
+        manager.requestInsuredBondWithdrawal(agentId, 1 ether);
+        vm.warp(block.timestamp + manager.insuredWithdrawalDelay() + 1);
+        vm.prank(insurer);
+        manager.executeInsuredBondWithdrawal(agentId);
+        _assertBondInvariants(agentId);
+    }
+
+    function test_delayedWithdrawalDelayEnforced() public {
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 3 ether);
+
+        vm.prank(insurer);
+        manager.requestInsuredBondWithdrawal(agentId, 2 ether);
+
+        vm.prank(insurer);
+        vm.expectRevert(AgentBondManager.InsuredWithdrawalDelayNotElapsed.selector);
+        manager.executeInsuredBondWithdrawal(agentId);
+
+        vm.warp(block.timestamp + manager.insuredWithdrawalDelay() + 1);
+        vm.prank(insurer);
+        manager.executeInsuredBondWithdrawal(agentId);
+
+        (uint256 amount, uint256 locked, uint256 insured, address insurerAddress) = manager.bonds(agentId);
+        assertEq(amount, 1 ether);
+        assertEq(locked, 0);
+        assertEq(insured, 1 ether);
+        assertEq(insurerAddress, insurer);
+
+        vm.prank(insurer);
+        vm.expectRevert(AgentBondManager.NoPendingInsuredWithdrawal.selector);
+        manager.executeInsuredBondWithdrawal(agentId);
+    }
+
+    function test_multiTaskConcurrentLifecycle() public {
+        vm.prank(agentOwner);
+        manager.depositBond(agentId, 6 ether);
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 4 ether);
+
+        uint256 taskA = _createTask(keccak256("multi-a"), block.timestamp + 1 days, 2 ether);
+        uint256 taskB = _createTask(keccak256("multi-b"), block.timestamp + 1 days, 3 ether);
+
+        vm.prank(client);
+        manager.disputeTask(taskA, 0);
+        bytes32 reqHashA = manager.requestHash(taskA);
+        validation.setValidation(reqHashA, validator, agentId, 0, true);
+        manager.resolveDispute(taskA);
+
+        vm.prank(client);
+        manager.completeTask(taskB);
+
+        uint256 slashAmount = (2 ether * SLASH_BPS) / 10_000;
+        uint256 expectedInsured = 4 ether - ((slashAmount * 4 ether) / 10 ether);
+        uint256 expectedAmount = 10 ether - slashAmount;
+
+        (uint256 amount, uint256 locked, uint256 insured,) = manager.bonds(agentId);
+        assertEq(amount, expectedAmount);
+        assertEq(locked, 0);
+        assertEq(insured, expectedInsured);
+        assertEq(manager.insuredAvailableBond(agentId), expectedInsured);
+        assertEq(manager.selfFundedAvailableBond(agentId), expectedAmount - expectedInsured);
+        _assertBondInvariants(agentId);
+    }
+
+    function test_fullSlashThenReUnderwriteByNewInsurer() public {
+        address insurerTwo = makeAddr("insurer-two-reunderwrite");
+        settlementToken.mint(insurerTwo, 100 ether);
+        vm.prank(insurerTwo);
+        settlementToken.approve(address(manager), type(uint256).max);
+        manager.addTrustedInsurer(insurerTwo);
+
+        manager.setSlashBps(10_000);
+
+        vm.prank(insurer);
+        manager.depositBondFor(agentId, 5 ether);
+
+        uint256 taskId = _createTask(keccak256("full-slash-insured"), block.timestamp + 1 days, 5 ether);
+        vm.prank(client);
+        manager.disputeTask(taskId, 0);
+        bytes32 reqHash = manager.requestHash(taskId);
+        validation.setValidation(reqHash, validator, agentId, 0, true);
+        manager.resolveDispute(taskId);
+
+        (, uint256 lockedAfter, uint256 insuredAfter, address insurerAfter) = manager.bonds(agentId);
+        assertEq(lockedAfter, 0);
+        assertEq(insuredAfter, 0);
+        assertEq(insurerAfter, address(0));
+
+        vm.prank(insurerTwo);
+        manager.depositBondFor(agentId, 2 ether);
+        (, uint256 locked, uint256 insured, address insurerAddress) = manager.bonds(agentId);
+        assertEq(locked, 0);
+        assertEq(insured, 2 ether);
+        assertEq(insurerAddress, insurerTwo);
+        _assertBondInvariants(agentId);
     }
 
     // --- Task Creation Tests ---
@@ -2085,6 +2343,29 @@ contract AgentBondManagerTest is Test {
         assertEq(manager.registryFailureGracePeriod(), 0);
     }
 
+    function test_setInsuredWithdrawalDelay_rejectsBelowMin() public {
+        vm.expectRevert(AgentBondManager.InvalidParameter.selector);
+        manager.setInsuredWithdrawalDelay(59 minutes);
+    }
+
+    function test_setInsuredWithdrawalDelay_rejectsAboveMax() public {
+        vm.expectRevert(AgentBondManager.InvalidParameter.selector);
+        manager.setInsuredWithdrawalDelay(8 days);
+    }
+
+    function test_setInsuredWithdrawalDelay_acceptsRange() public {
+        manager.setInsuredWithdrawalDelay(3 hours);
+        assertEq(manager.insuredWithdrawalDelay(), 3 hours);
+        manager.setInsuredWithdrawalDelay(7 days);
+        assertEq(manager.insuredWithdrawalDelay(), 7 days);
+    }
+
+    function test_setInsuredWithdrawalDelay_onlyOwner() public {
+        vm.prank(client);
+        vm.expectRevert(AgentBondManager.NotOwner.selector);
+        manager.setInsuredWithdrawalDelay(2 hours);
+    }
+
     function test_setValidationFinalityPolicy_acceptsValues() public {
         manager.setValidationFinalityPolicy(FINALITY_POLICY_ANY_STATUS_RECORD);
         assertEq(uint8(manager.validationFinalityPolicy()), FINALITY_POLICY_ANY_STATUS_RECORD);
@@ -2485,5 +2766,68 @@ contract AgentBondManagerTest is Test {
         uint256 expectedSlash = (task.bondLocked * task.snapshotSlashBps) / 10_000;
         assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
         assertEq(manager.claimable(client), payment + expectedSlash);
+    }
+
+    function testFuzz_invariantSequenceFuzz(bytes32 seed, uint8 stepsRaw) public {
+        uint256 steps = bound(uint256(stepsRaw), 8, 48);
+
+        for (uint256 i; i < steps; i++) {
+            uint256 op = uint256(keccak256(abi.encode(seed, i, block.timestamp))) % 8;
+
+            if (op == 0) {
+                uint256 amount = ((uint256(keccak256(abi.encode(seed, i, "owner-deposit"))) % 3) + 1) * 1 ether;
+                vm.prank(agentOwner);
+                manager.depositBond(agentId, amount);
+            } else if (op == 1) {
+                uint256 amount = ((uint256(keccak256(abi.encode(seed, i, "insurer-deposit"))) % 3) + 1) * 1 ether;
+                vm.prank(insurer);
+                try manager.depositBondFor(agentId, amount) {} catch {}
+            } else if (op == 2) {
+                uint256 selfFundedAvailable = manager.selfFundedAvailableBond(agentId);
+                if (selfFundedAvailable > 0) {
+                    uint256 withdrawAmount = selfFundedAvailable > 1 ether ? 1 ether : selfFundedAvailable;
+                    vm.prank(agentOwner);
+                    manager.withdrawBond(agentId, withdrawAmount);
+                }
+            } else if (op == 3) {
+                uint256 insuredAvailable = manager.insuredAvailableBond(agentId);
+                if (insuredAvailable > 0) {
+                    uint256 withdrawAmount = insuredAvailable > 1 ether ? 1 ether : insuredAvailable;
+                    vm.prank(insurer);
+                    try manager.withdrawInsuredBond(agentId, withdrawAmount) {} catch {}
+                }
+            } else if (op == 4) {
+                uint256 insuredAvailable = manager.insuredAvailableBond(agentId);
+                if (insuredAvailable > 0) {
+                    uint256 requestAmount = insuredAvailable > 1 ether ? 1 ether : insuredAvailable;
+                    vm.prank(insurer);
+                    manager.requestInsuredBondWithdrawal(agentId, requestAmount);
+                    vm.warp(block.timestamp + manager.insuredWithdrawalDelay() + 1);
+                    vm.prank(insurer);
+                    manager.executeInsuredBondWithdrawal(agentId);
+                }
+            } else if (op == 5) {
+                if (manager.availableBond(agentId) >= 1 ether) {
+                    uint256 taskId =
+                        _createTask(keccak256(abi.encodePacked("fuzz-complete", seed, i)), block.timestamp + 1 days, 1 ether);
+                    vm.prank(client);
+                    manager.completeTask(taskId);
+                }
+            } else if (op == 6) {
+                if (manager.availableBond(agentId) >= 1 ether) {
+                    uint256 taskId =
+                        _createTask(keccak256(abi.encodePacked("fuzz-slash", seed, i)), block.timestamp + 1 days, 1 ether);
+                    vm.prank(client);
+                    manager.disputeTask(taskId, 0);
+                    bytes32 reqHash = manager.requestHash(taskId);
+                    validation.setValidation(reqHash, validator, agentId, 0, true);
+                    manager.resolveDispute(taskId);
+                }
+            } else {
+                // Keep deterministic no-op branch to diversify operation sequences.
+            }
+
+            _assertBondInvariants(agentId);
+        }
     }
 }

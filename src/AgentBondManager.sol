@@ -86,6 +86,14 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     struct Bond {
         uint256 amount;
         uint256 locked;
+        uint256 insured;
+        address insurer;
+    }
+
+    struct PendingInsuredWithdrawal {
+        address insurer;
+        uint256 amount;
+        uint48 executableAt;
     }
 
     struct Task {
@@ -140,6 +148,9 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     uint256 private constant MAX_KNOWNNESS_SCAN = 512;
     uint256 private constant DEFAULT_MAX_AGENT_TASK_HISTORY = 4096;
     uint256 private constant MAX_MIN_VALIDATOR_FEE_TOKENS = 1_000_000;
+    uint256 private constant DEFAULT_INSURED_WITHDRAWAL_DELAY = 24 hours;
+    uint256 private constant MIN_INSURED_WITHDRAWAL_DELAY = 1 hours;
+    uint256 private constant MAX_INSURED_WITHDRAWAL_DELAY = 7 days;
     uint8 private constant REQUEST_KNOWN_STATE_UNSET = 0;
     uint8 private constant REQUEST_KNOWN_STATE_MISSING = 1;
     uint8 private constant REQUEST_KNOWN_STATE_KNOWN = 2;
@@ -175,6 +186,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     mapping(uint256 taskId => uint256) public registryFailureSince;
     mapping(uint256 agentId => AgentOutcomes) private _agentOutcomes;
     uint256 public registryFailureGracePeriod;
+    uint256 public insuredWithdrawalDelay;
     ValidationFinalityPolicy public validationFinalityPolicy;
     StatusLookupFailurePolicy public statusLookupFailurePolicy;
     // Dispute request knownness cache:
@@ -182,13 +194,20 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     mapping(uint256 taskId => uint8) private _disputeRequestKnownState;
     ValidatorSelectionPolicy public validatorSelectionPolicy;
     mapping(address validator => bool) public trustedValidators;
+    mapping(address insurer => bool) public trustedInsurers;
     uint256 public maxAgentTaskHistory;
     mapping(uint256 agentId => mapping(uint256 index => uint256 taskId)) private _agentTaskHistory;
     mapping(uint256 agentId => uint256) private _agentTaskHistoryStart;
     mapping(uint256 agentId => uint256) private _agentTaskHistoryCount;
+    mapping(uint256 agentId => PendingInsuredWithdrawal) public pendingInsuredWithdrawals;
 
     event BondDeposited(uint256 indexed agentId, address indexed depositor, uint256 amount);
+    event BondDepositedFor(uint256 indexed agentId, address indexed insurer, uint256 amount);
     event BondWithdrawn(uint256 indexed agentId, address indexed recipient, uint256 amount);
+    event InsuredBondWithdrawn(uint256 indexed agentId, address indexed insurer, uint256 amount);
+    event InsuredBondWithdrawalRequested(
+        uint256 indexed agentId, address indexed insurer, uint256 amount, uint256 executableAt
+    );
     event TaskCreated(
         uint256 indexed taskId,
         uint256 indexed agentId,
@@ -210,6 +229,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     event RegistryFailureRecorded(uint256 indexed taskId, uint256 retryAfter);
     event DisputeRefundedNoRegistry(uint256 indexed taskId, address indexed beneficiary);
     event RegistryFailureGracePeriodUpdated(uint256 oldPeriod, uint256 newPeriod);
+    event InsuredWithdrawalDelayUpdated(uint256 oldDelay, uint256 newDelay);
     event ValidationFinalityPolicyUpdated(uint8 oldPolicy, uint8 newPolicy);
     event StatusLookupFailurePolicyUpdated(uint8 oldPolicy, uint8 newPolicy);
     event ValidatorSelectionPolicyUpdated(uint8 oldPolicy, uint8 newPolicy);
@@ -217,6 +237,8 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     event Permit2Updated(address oldPermit2, address newPermit2);
     event TrustedValidatorAdded(address indexed validator);
     event TrustedValidatorRemoved(address indexed validator);
+    event TrustedInsurerAdded(address indexed insurer);
+    event TrustedInsurerRemoved(address indexed insurer);
     event MaxAgentTaskHistoryUpdated(uint256 oldLimit, uint256 newLimit);
     event Credited(address indexed account, uint256 amount);
     event Claimed(address indexed account, uint256 amount);
@@ -241,6 +263,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     error ZeroValue();
     error InvalidStatus();
     error InsufficientBond();
+    error InsufficientInsuredBond();
     error DeadlineInPast();
     error EmptyTaskHash();
     error NotExpired();
@@ -255,12 +278,18 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     error InvalidSignature();
     error ValidatorMismatch();
     error ValidatorNotTrusted();
+    error InsurerNotTrusted();
     error ValidatorFeeBelowMinimum();
     error InsufficientValidatorFee();
     error RegistryUnavailable();
     error TokenTransferMismatch();
     error PermitAmountTooLow();
     error AddressWithoutCode();
+    error NotInsurer();
+    error InsurerMismatch();
+    error InvalidBondAccounting();
+    error InsuredWithdrawalDelayNotElapsed();
+    error NoPendingInsuredWithdrawal();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -317,6 +346,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         minPassingScore = minPassingScore_;
         slashBps = slashBps_;
         registryFailureGracePeriod = 3 days;
+        insuredWithdrawalDelay = DEFAULT_INSURED_WITHDRAWAL_DELAY;
         validationFinalityPolicy = ValidationFinalityPolicy.ResponseHashRequired;
         statusLookupFailurePolicy = StatusLookupFailurePolicy.CanonicalUnknownAsMissing;
         validatorSelectionPolicy = ValidatorSelectionPolicy.DesignatedOnly;
@@ -332,6 +362,24 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         _validateDeposit(msg.sender, agentId, amount);
         _pullPayment(msg.sender, amount);
         _recordDeposit(agentId, msg.sender, amount);
+    }
+
+    function depositBondFor(uint256 agentId, uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroValue();
+        if (!trustedInsurers[msg.sender]) revert InsurerNotTrusted();
+        if (IDENTITY_REGISTRY.ownerOf(agentId) == address(0)) revert InvalidParameter();
+
+        Bond storage bond = bonds[agentId];
+        if (bond.insurer != address(0) && bond.insurer != msg.sender) revert InsurerMismatch();
+
+        _pullPayment(msg.sender, amount);
+        bond.amount += amount;
+        bond.insured += amount;
+        if (bond.insurer == address(0)) {
+            bond.insurer = msg.sender;
+        }
+        _assertBondAccounting(bond);
+        emit BondDepositedFor(agentId, msg.sender, amount);
     }
 
     function depositBondWithPermit2(
@@ -368,14 +416,46 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         if (!IDENTITY_REGISTRY.isAuthorizedOrOwner(msg.sender, agentId)) revert NotAgentOwner();
 
         Bond storage bond = bonds[agentId];
-        uint256 available = bond.amount - bond.locked;
-        if (amount > available) revert InsufficientBond();
+        uint256 selfFunded = _selfFundedAvailableBond(bond);
+        if (amount > selfFunded) revert InsufficientBond();
 
         bond.amount -= amount;
+        _assertBondAccounting(bond);
 
         address recipient = _agentRecipient(agentId);
         _pushPayment(recipient, amount);
         emit BondWithdrawn(agentId, recipient, amount);
+    }
+
+    function withdrawInsuredBond(uint256 agentId, uint256 amount) external nonReentrant {
+        _withdrawInsuredBond(agentId, msg.sender, amount);
+    }
+
+    function requestInsuredBondWithdrawal(uint256 agentId, uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroValue();
+
+        Bond storage bond = bonds[agentId];
+        if (msg.sender != bond.insurer) revert NotInsurer();
+        if (amount > _insuredAvailableBond(bond)) revert InsufficientInsuredBond();
+
+        uint256 executableAt = block.timestamp + insuredWithdrawalDelay;
+        pendingInsuredWithdrawals[agentId] = PendingInsuredWithdrawal({
+            insurer: msg.sender,
+            amount: amount,
+            executableAt: uint48(executableAt)
+        });
+
+        emit InsuredBondWithdrawalRequested(agentId, msg.sender, amount, executableAt);
+    }
+
+    function executeInsuredBondWithdrawal(uint256 agentId) external nonReentrant {
+        PendingInsuredWithdrawal memory pending = pendingInsuredWithdrawals[agentId];
+        if (pending.insurer == address(0)) revert NoPendingInsuredWithdrawal();
+        if (msg.sender != pending.insurer) revert NotInsurer();
+        if (block.timestamp < pending.executableAt) revert InsuredWithdrawalDelayNotElapsed();
+
+        delete pendingInsuredWithdrawals[agentId];
+        _withdrawInsuredBond(agentId, msg.sender, pending.amount);
     }
 
     /// @notice Requires EIP-712 signature from the agent (or authorized operator/smart wallet).
@@ -676,6 +756,14 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         registryFailureGracePeriod = newPeriod;
     }
 
+    function setInsuredWithdrawalDelay(uint256 newDelay) external onlyOwner {
+        if (newDelay < MIN_INSURED_WITHDRAWAL_DELAY || newDelay > MAX_INSURED_WITHDRAWAL_DELAY) {
+            revert InvalidParameter();
+        }
+        emit InsuredWithdrawalDelayUpdated(insuredWithdrawalDelay, newDelay);
+        insuredWithdrawalDelay = newDelay;
+    }
+
     function setValidationFinalityPolicy(uint8 newPolicy) external onlyOwner {
         if (newPolicy > uint8(ValidationFinalityPolicy.AnyStatusRecord)) revert InvalidParameter();
         uint8 oldPolicy = uint8(validationFinalityPolicy);
@@ -708,6 +796,19 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         if (!trustedValidators[validator]) revert InvalidParameter();
         trustedValidators[validator] = false;
         emit TrustedValidatorRemoved(validator);
+    }
+
+    function addTrustedInsurer(address insurer) external onlyOwner {
+        if (insurer == address(0)) revert ZeroAddress();
+        if (trustedInsurers[insurer]) revert InvalidParameter();
+        trustedInsurers[insurer] = true;
+        emit TrustedInsurerAdded(insurer);
+    }
+
+    function removeTrustedInsurer(address insurer) external onlyOwner {
+        if (!trustedInsurers[insurer]) revert InvalidParameter();
+        trustedInsurers[insurer] = false;
+        emit TrustedInsurerRemoved(insurer);
     }
 
     function setMinValidatorFee(uint256 newMinFee) external onlyOwner {
@@ -745,7 +846,8 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     // --- Views ---
 
     function availableBond(uint256 agentId) external view returns (uint256) {
-        return bonds[agentId].amount - bonds[agentId].locked;
+        Bond storage bond = bonds[agentId];
+        return _availableBond(bond);
     }
 
     function getTask(uint256 taskId) external view returns (Task memory) {
@@ -754,6 +856,20 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
 
     function getBond(uint256 agentId) external view returns (uint256 amount, uint256 locked) {
         return (bonds[agentId].amount, bonds[agentId].locked);
+    }
+
+    function insuredBond(uint256 agentId) external view returns (uint256) {
+        return bonds[agentId].insured;
+    }
+
+    function insuredAvailableBond(uint256 agentId) external view returns (uint256) {
+        Bond storage bond = bonds[agentId];
+        return _insuredAvailableBond(bond);
+    }
+
+    function selfFundedAvailableBond(uint256 agentId) external view returns (uint256) {
+        Bond storage bond = bonds[agentId];
+        return _selfFundedAvailableBond(bond);
     }
 
     function agentTaskIds(uint256 agentId) external view returns (uint256[] memory) {
@@ -916,7 +1032,9 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     function _unlockBond(uint256 agentId, uint256 amount) internal {
-        bonds[agentId].locked -= amount;
+        Bond storage bond = bonds[agentId];
+        bond.locked -= amount;
+        _assertBondAccounting(bond);
     }
 
     function _validateDeposit(address depositor, uint256 agentId, uint256 amount) internal view {
@@ -925,7 +1043,9 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     function _recordDeposit(uint256 agentId, address depositor, uint256 amount) internal {
-        bonds[agentId].amount += amount;
+        Bond storage bond = bonds[agentId];
+        bond.amount += amount;
+        _assertBondAccounting(bond);
         emit BondDeposited(agentId, depositor, amount);
     }
 
@@ -1008,9 +1128,10 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     function _recordTask(address client_, CreateTaskInput memory input) internal returns (uint256 taskId) {
         uint256 requiredBond = SCORER.getRequiredBond(input.agentId, input.paymentAmount);
         Bond storage bond = bonds[input.agentId];
-        uint256 available = bond.amount - bond.locked;
+        uint256 available = _availableBond(bond);
         if (available < requiredBond) revert InsufficientBond();
         bond.locked += requiredBond;
+        _assertBondAccounting(bond);
 
         taskId = nextTaskId++;
         tasks[taskId] = Task({
@@ -1096,12 +1217,72 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         if (slashAmount > task.bondLocked) slashAmount = task.bondLocked;
 
         Bond storage bond = bonds[task.agentId];
-        bond.amount -= slashAmount;
+        _applySlashToBond(bond, slashAmount);
         bond.locked -= task.bondLocked;
+        if (bond.insured == 0) {
+            delete pendingInsuredWithdrawals[task.agentId];
+        }
+        _assertBondAccounting(bond);
 
         _credit(task.clientRecipient, task.payment + slashAmount);
         emit BondSlashed(task.agentId, taskId, slashAmount);
         return slashAmount;
+    }
+
+    function _applySlashToBond(Bond storage bond, uint256 slashAmount) internal {
+        uint256 totalBefore = bond.amount;
+        if (totalBefore == 0) revert InsufficientBond();
+
+        uint256 insuredSlash = (slashAmount * bond.insured) / totalBefore;
+        if (insuredSlash > bond.insured) {
+            insuredSlash = bond.insured;
+        }
+
+        bond.amount -= slashAmount;
+        bond.insured -= insuredSlash;
+        if (bond.insured == 0) {
+            bond.insurer = address(0);
+        }
+    }
+
+    function _withdrawInsuredBond(uint256 agentId, address insurer, uint256 amount) internal {
+        if (amount == 0) revert ZeroValue();
+
+        Bond storage bond = bonds[agentId];
+        if (insurer != bond.insurer) revert NotInsurer();
+        if (amount > _insuredAvailableBond(bond)) revert InsufficientInsuredBond();
+
+        bond.amount -= amount;
+        bond.insured -= amount;
+        if (bond.insured == 0) {
+            bond.insurer = address(0);
+            delete pendingInsuredWithdrawals[agentId];
+        }
+        _assertBondAccounting(bond);
+        _pushPayment(insurer, amount);
+        emit InsuredBondWithdrawn(agentId, insurer, amount);
+    }
+
+    function _availableBond(Bond storage bond) internal view returns (uint256) {
+        return bond.amount - bond.locked;
+    }
+
+    function _insuredAvailableBond(Bond storage bond) internal view returns (uint256) {
+        uint256 available = _availableBond(bond);
+        return bond.insured < available ? bond.insured : available;
+    }
+
+    function _selfFundedAvailableBond(Bond storage bond) internal view returns (uint256) {
+        uint256 available = _availableBond(bond);
+        uint256 insuredAvailable = _insuredAvailableBond(bond);
+        return available - insuredAvailable;
+    }
+
+    function _assertBondAccounting(Bond storage bond) internal view {
+        if (bond.locked > bond.amount) revert InvalidBondAccounting();
+        if (bond.insured > bond.amount) revert InvalidBondAccounting();
+        if (bond.insured == 0 && bond.insurer != address(0)) revert InvalidBondAccounting();
+        if (bond.insured > 0 && bond.insurer == address(0)) revert InvalidBondAccounting();
     }
 
     function _credit(address to, uint256 amount) internal {
