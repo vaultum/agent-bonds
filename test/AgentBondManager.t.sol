@@ -40,6 +40,7 @@ contract AgentBondManagerTest is Test {
     uint8 constant VALIDATOR_SELECTION_POLICY_DESIGNATED_ONLY = 0;
     uint8 constant VALIDATOR_SELECTION_POLICY_DESIGNATED_AND_ALLOWLISTED = 1;
     uint256 constant DEFAULT_VALIDATOR_FEE_AMOUNT = 0;
+    uint256 constant MAX_AGENT_TASK_HISTORY_CAP = 16_384;
 
     bytes32 private constant TASK_PERMIT_TYPEHASH = keccak256(
         "TaskPermit(uint256 agentId,address client,address agentRecipient,address clientRecipient,address committedValidator,uint256 validatorFeeAmount,uint256 paymentAmount,uint256 deadline,bytes32 taskHash,uint256 nonce)"
@@ -52,6 +53,7 @@ contract AgentBondManagerTest is Test {
 
     event DisputeExpiredClaimed(uint256 indexed taskId, address indexed beneficiary);
     event DisputeRefundedNoRegistry(uint256 indexed taskId, address indexed beneficiary);
+    event DisputeRefundedNoValidationRequest(uint256 indexed taskId, address indexed beneficiary);
 
     function setUp() public {
         agentOwner = vm.addr(AGENT_OWNER_PK);
@@ -1150,6 +1152,25 @@ contract AgentBondManagerTest is Test {
         manager.disputeTask(taskId, 0.009 ether);
     }
 
+    function test_disputeTask_revertsWhenValidatorFeeOverpaid() public {
+        vm.prank(agentOwner);
+        manager.depositBond(agentId, 10 ether);
+
+        uint256 taskId = _createTaskWithRecipientsValidatorAndFee(
+            keccak256("overpaid-validator-fee"),
+            block.timestamp + 1 days,
+            1 ether,
+            agentOwner,
+            client,
+            validator,
+            0.01 ether
+        );
+
+        vm.prank(client);
+        vm.expectRevert(AgentBondManager.ValidatorFeeMismatch.selector);
+        manager.disputeTask(taskId, 0.011 ether);
+    }
+
     function test_disputeTaskWithPermit2() public {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
@@ -1264,9 +1285,8 @@ contract AgentBondManagerTest is Test {
         vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
         manager.reclaimDisputedTask(taskId);
 
-        uint256 expectedSlash = (1 ether * SLASH_BPS) / 10_000;
         assertEq(manager.validatorFeeEscrow(taskId), 0);
-        assertEq(manager.claimable(client), 1 ether + expectedSlash + validatorFeeAmount);
+        assertEq(manager.claimable(client), 1 ether + validatorFeeAmount);
     }
 
     // --- Complete Task Tests ---
@@ -1505,7 +1525,7 @@ contract AgentBondManagerTest is Test {
 
     // --- Reclaim & Expiry Tests ---
 
-    function test_reclaimDisputedTask() public {
+    function test_reclaimDisputedTask_refundsWhenRequestWasNeverCommitted() public {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
 
@@ -1517,11 +1537,10 @@ contract AgentBondManagerTest is Test {
         vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
         manager.reclaimDisputedTask(taskId);
 
-        uint256 expectedSlash = (1 ether * SLASH_BPS) / 10_000;
-        assertEq(manager.claimable(client), 1 ether + expectedSlash);
+        assertEq(manager.claimable(client), 1 ether);
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
-        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
     }
 
     function test_reclaimDisputedTask_slashesWhenValidationPending() public {
@@ -1543,7 +1562,7 @@ contract AgentBondManagerTest is Test {
         assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
     }
 
-    function test_reclaimDisputedTask_unknownRevertSlashes() public {
+    function test_reclaimDisputedTask_unknownRevertRefundsWhenRequestMissing() public {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
 
@@ -1559,17 +1578,17 @@ contract AgentBondManagerTest is Test {
         vm.warp(block.timestamp + DISPUTE_PERIOD + 1);
 
         vm.expectEmit(true, true, false, false, address(manager));
-        emit DisputeExpiredClaimed(taskId, clientRecipient_);
+        emit DisputeRefundedNoValidationRequest(taskId, clientRecipient_);
         manager.reclaimDisputedTask(taskId);
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
-        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
         assertEq(manager.registryFailureSince(taskId), 0);
-        assertEq(manager.claimable(clientRecipient_), 1.5 ether);
+        assertEq(manager.claimable(clientRecipient_), 1 ether);
         assertEq(manager.claimable(client), 0);
     }
 
-    function test_reclaimDisputedTask_statusRevertUnknownRequestSlashesByDefault() public {
+    function test_reclaimDisputedTask_statusRevertUnknownRequestRefundsByDefault() public {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
 
@@ -1584,7 +1603,7 @@ contract AgentBondManagerTest is Test {
         manager.reclaimDisputedTask(taskId);
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
-        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
         assertEq(manager.registryFailureSince(taskId), 0);
     }
 
@@ -1638,9 +1657,9 @@ contract AgentBondManagerTest is Test {
         manager.reclaimDisputedTask(taskId);
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
-        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
         assertEq(manager.registryFailureSince(taskId), 0);
-        assertEq(manager.claimable(client), 1.5 ether);
+        assertEq(manager.claimable(client), 1 ether);
     }
 
     function test_reclaimDisputedTask_statusRevertKnownRequestUnavailableByDefault() public {
@@ -1663,7 +1682,7 @@ contract AgentBondManagerTest is Test {
         assertTrue(manager.getTask(taskId).status == AgentBondManager.TaskStatus.Disputed);
     }
 
-    function test_reclaimDisputedTask_statusRevertSlashesWhenPolicyAlwaysMissing() public {
+    function test_reclaimDisputedTask_statusRevertUnknownRequestRefundsWhenSnapshotPolicyCanonical() public {
         vm.prank(agentOwner);
         manager.depositBond(agentId, 10 ether);
 
@@ -1679,7 +1698,7 @@ contract AgentBondManagerTest is Test {
         manager.reclaimDisputedTask(taskId);
 
         AgentBondManager.Task memory task = manager.getTask(taskId);
-        assertTrue(task.status == AgentBondManager.TaskStatus.Slashed);
+        assertTrue(task.status == AgentBondManager.TaskStatus.Refunded);
         assertEq(manager.registryFailureSince(taskId), 0);
     }
 
@@ -1689,6 +1708,7 @@ contract AgentBondManagerTest is Test {
 
         manager.setStatusLookupFailurePolicy(STATUS_LOOKUP_POLICY_ALWAYS_MISSING);
         uint256 slashTaskId = _createTask(keccak256("non-canonical-missing"), block.timestamp + 1 days, 1 ether);
+        validation.setValidation(manager.requestHash(slashTaskId), validator, agentId, 0, false);
         vm.prank(client);
         manager.disputeTask(slashTaskId, 0);
 
@@ -2407,6 +2427,16 @@ contract AgentBondManagerTest is Test {
     function test_setMaxAgentTaskHistory_rejectsZero() public {
         vm.expectRevert(AgentBondManager.InvalidParameter.selector);
         manager.setMaxAgentTaskHistory(0);
+    }
+
+    function test_setMaxAgentTaskHistory_rejectsAboveHardCap() public {
+        vm.expectRevert(AgentBondManager.InvalidParameter.selector);
+        manager.setMaxAgentTaskHistory(MAX_AGENT_TASK_HISTORY_CAP + 1);
+    }
+
+    function test_setMaxAgentTaskHistory_acceptsHardCap() public {
+        manager.setMaxAgentTaskHistory(MAX_AGENT_TASK_HISTORY_CAP);
+        assertEq(manager.maxAgentTaskHistory(), MAX_AGENT_TASK_HISTORY_CAP);
     }
 
     function test_setPermit2_rejectsAddressWithoutCode() public {

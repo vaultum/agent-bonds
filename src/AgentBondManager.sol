@@ -147,10 +147,13 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     bytes32 private constant VERSION_HASH = keccak256("1");
     uint256 private constant MAX_KNOWNNESS_SCAN = 512;
     uint256 private constant DEFAULT_MAX_AGENT_TASK_HISTORY = 4096;
+    uint256 private constant MAX_AGENT_TASK_HISTORY = 16_384;
     uint256 private constant MAX_MIN_VALIDATOR_FEE_TOKENS = 1_000_000;
     uint256 private constant DEFAULT_INSURED_WITHDRAWAL_DELAY = 24 hours;
     uint256 private constant MIN_INSURED_WITHDRAWAL_DELAY = 1 hours;
     uint256 private constant MAX_INSURED_WITHDRAWAL_DELAY = 7 days;
+    uint256 private constant REENTRANCY_UNLOCKED = 1;
+    uint256 private constant REENTRANCY_LOCKED = 2;
     uint8 private constant REQUEST_KNOWN_STATE_UNSET = 0;
     uint8 private constant REQUEST_KNOWN_STATE_MISSING = 1;
     uint8 private constant REQUEST_KNOWN_STATE_KNOWN = 2;
@@ -228,6 +231,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     event ValidatorFeeRefunded(uint256 indexed taskId, address indexed beneficiary, uint256 amount);
     event RegistryFailureRecorded(uint256 indexed taskId, uint256 retryAfter);
     event DisputeRefundedNoRegistry(uint256 indexed taskId, address indexed beneficiary);
+    event DisputeRefundedNoValidationRequest(uint256 indexed taskId, address indexed beneficiary);
     event RegistryFailureGracePeriodUpdated(uint256 oldPeriod, uint256 newPeriod);
     event InsuredWithdrawalDelayUpdated(uint256 oldDelay, uint256 newDelay);
     event ValidationFinalityPolicyUpdated(uint8 oldPolicy, uint8 newPolicy);
@@ -272,7 +276,6 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     error AgentMismatch();
     error NoValidationResponse();
     error ValidationExists();
-    error TransferFailed();
     error Reentrancy();
     error InvalidParameter();
     error InvalidSignature();
@@ -281,6 +284,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     error InsurerNotTrusted();
     error ValidatorFeeBelowMinimum();
     error InsufficientValidatorFee();
+    error ValidatorFeeMismatch();
     error RegistryUnavailable();
     error TokenTransferMismatch();
     error PermitAmountTooLow();
@@ -297,18 +301,10 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     modifier nonReentrant() {
-        uint256 locked;
-        assembly ("memory-safe") {
-            locked := tload(0)
-        }
-        if (locked != 0) revert Reentrancy();
-        assembly ("memory-safe") {
-            tstore(0, 1)
-        }
+        if (_reentrancyStatus == REENTRANCY_LOCKED) revert Reentrancy();
+        _reentrancyStatus = REENTRANCY_LOCKED;
         _;
-        assembly ("memory-safe") {
-            tstore(0, 0)
-        }
+        _reentrancyStatus = REENTRANCY_UNLOCKED;
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -351,6 +347,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         statusLookupFailurePolicy = StatusLookupFailurePolicy.CanonicalUnknownAsMissing;
         validatorSelectionPolicy = ValidatorSelectionPolicy.DesignatedOnly;
         maxAgentTaskHistory = DEFAULT_MAX_AGENT_TASK_HISTORY;
+        _reentrancyStatus = REENTRANCY_UNLOCKED;
         owner = msg.sender;
         emit OwnershipTransferred(address(0), msg.sender);
     }
@@ -671,7 +668,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         emit TaskExpiredClaimed(taskId, task.agentId);
     }
 
-    /// @notice Slashes when no final validation exists; refund-only after grace if registry is unavailable.
+    /// @notice Slashes only for known disputes lacking final validation; otherwise refunds by policy.
     function reclaimDisputedTask(uint256 taskId) external nonReentrant {
         Task storage task = tasks[taskId];
         if (task.status != TaskStatus.Disputed) revert InvalidStatus();
@@ -680,13 +677,18 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         bytes32 reqHash = _requestHashForTask(taskId, task);
         uint8 finalityPolicy = _taskValidationFinalityPolicy(task);
         uint8 failurePolicy = _taskStatusLookupFailurePolicy(task);
+        bool requestKnown = _requestKnownForDispute(taskId, task.agentId, reqHash);
         bool registryFailed;
         bool validationExists;
         try VALIDATION_REGISTRY.getValidationStatus(reqHash) returns (
             address validatorAddr, uint256 validationAgentId, uint8, bytes32 responseHash, string memory, uint256
         ) {
+            bool missingValidationRecord = _isMissingValidationRecord(validatorAddr, validationAgentId);
+            if (!missingValidationRecord) {
+                requestKnown = true;
+            }
             if (
-                validationAgentId == task.agentId && validatorAddr == task.committedValidator
+                !missingValidationRecord && validationAgentId == task.agentId && validatorAddr == task.committedValidator
                     && _isFinalValidationRecord(responseHash, finalityPolicy)
             ) {
                 validationExists = true;
@@ -705,13 +707,13 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
                 return;
             }
             if (block.timestamp < failedAt + task.snapshotRegistryGracePeriod) revert RegistryUnavailable();
-            task.status = TaskStatus.Refunded;
-            _unlockBond(task.agentId, task.bondLocked);
             address beneficiary = task.clientRecipient;
-            _credit(beneficiary, task.payment);
-            _refundValidatorFee(taskId, beneficiary);
-            _recordNeutralOutcome(task.agentId, taskId);
+            _refundDisputedTask(task, taskId, beneficiary);
             emit DisputeRefundedNoRegistry(taskId, beneficiary);
+        } else if (!requestKnown) {
+            address beneficiary = task.clientRecipient;
+            _refundDisputedTask(task, taskId, beneficiary);
+            emit DisputeRefundedNoValidationRequest(taskId, beneficiary);
         } else {
             task.status = TaskStatus.Slashed;
             uint256 slashAmount = _slashAndRefund(task, taskId);
@@ -825,7 +827,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     function setMaxAgentTaskHistory(uint256 newLimit) external onlyOwner {
-        if (newLimit == 0) revert InvalidParameter();
+        if (newLimit == 0 || newLimit > MAX_AGENT_TASK_HISTORY) revert InvalidParameter();
         emit MaxAgentTaskHistoryUpdated(maxAgentTaskHistory, newLimit);
         maxAgentTaskHistory = newLimit;
     }
@@ -1195,6 +1197,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         if (block.timestamp > task.deadline) revert DeadlinePassed();
         requiredFee = validatorFeeCommitment[taskId];
         if (validatorFeeAmount < requiredFee) revert InsufficientValidatorFee();
+        if (validatorFeeAmount > requiredFee) revert ValidatorFeeMismatch();
     }
 
     function _recordDispute(Task storage task, uint256 taskId, uint256 validatorFeeAmount, uint256 requiredFee) internal {
@@ -1205,9 +1208,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         task.snapshotStatusLookupFailurePolicy = uint8(statusLookupFailurePolicy);
         validatorFeeEscrow[taskId] = validatorFeeAmount;
         _disputeRequestKnownState[taskId] = REQUEST_KNOWN_STATE_UNSET;
-        if (task.snapshotStatusLookupFailurePolicy == uint8(StatusLookupFailurePolicy.CanonicalUnknownAsMissing)) {
-            _cacheDisputeRequestKnownness(taskId, task.agentId, _requestHashForTask(taskId, task));
-        }
+        _cacheDisputeRequestKnownness(taskId, task.agentId, _requestHashForTask(taskId, task));
         emit ValidatorFeeEscrowed(taskId, msg.sender, validatorFeeAmount, requiredFee);
         emit TaskDisputed(taskId, task.agentId);
     }
@@ -1364,6 +1365,14 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         emit ValidatorFeeRefunded(taskId, beneficiary, fee);
     }
 
+    function _refundDisputedTask(Task storage task, uint256 taskId, address beneficiary) internal {
+        task.status = TaskStatus.Refunded;
+        _unlockBond(task.agentId, task.bondLocked);
+        _credit(beneficiary, task.payment);
+        _refundValidatorFee(taskId, beneficiary);
+        _recordNeutralOutcome(task.agentId, taskId);
+    }
+
     function _pushPayment(address to, uint256 amount) internal {
         settlementToken.safeTransfer(to, amount);
     }
@@ -1463,7 +1472,7 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
             return true;
         }
         _disputeRequestKnownState[taskId] = known ? REQUEST_KNOWN_STATE_KNOWN : REQUEST_KNOWN_STATE_MISSING;
-        // unknown request => missing (slash path), known request with failed status read => unavailable.
+        // Unknown request stays non-unavailable; known request with failed status read is unavailable.
         return known;
     }
 
@@ -1497,12 +1506,28 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
     }
 
     function _cacheDisputeRequestKnownness(uint256 taskId, uint256 agentId, bytes32 reqHash) internal {
-        (bool supported, bool known) = _isRequestKnownForAgent(agentId, reqHash);
+        _requestKnownForDispute(taskId, agentId, reqHash);
+    }
+
+    function _requestKnownForDispute(uint256 taskId, uint256 agentId, bytes32 reqHash) internal returns (bool known) {
+        uint8 knownState = _disputeRequestKnownState[taskId];
+        if (knownState == REQUEST_KNOWN_STATE_MISSING) {
+            return false;
+        }
+        if (knownState == REQUEST_KNOWN_STATE_KNOWN) {
+            return true;
+        }
+        if (knownState == REQUEST_KNOWN_STATE_UNSUPPORTED) {
+            return false;
+        }
+
+        (bool supported, bool isKnown) = _isRequestKnownForAgent(agentId, reqHash);
         if (!supported) {
             _disputeRequestKnownState[taskId] = REQUEST_KNOWN_STATE_UNSUPPORTED;
-            return;
+            return false;
         }
-        _disputeRequestKnownState[taskId] = known ? REQUEST_KNOWN_STATE_KNOWN : REQUEST_KNOWN_STATE_MISSING;
+        _disputeRequestKnownState[taskId] = isKnown ? REQUEST_KNOWN_STATE_KNOWN : REQUEST_KNOWN_STATE_MISSING;
+        return isKnown;
     }
 
     function _isRequestKnownForAgent(uint256 agentId, bytes32 reqHash)
@@ -1552,5 +1577,6 @@ contract AgentBondManager is Initializable, UUPSUpgradeable {
         }
     }
 
-    uint256[36] private __gap;
+    uint256 private _reentrancyStatus;
+    uint256[35] private __gap;
 }
