@@ -15,6 +15,7 @@ contract Upgrade is Script {
         0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
     function run() external {
+        _requireExpectedChainId();
         address deployer = vm.envAddress("DEPLOYER_ADDRESS");
         string memory target = vm.envString("TARGET");
         address proxy = _resolveProxy(target);
@@ -23,22 +24,28 @@ contract Upgrade is Script {
         if (proxy.code.length == 0) revert("No code at proxy address");
 
         address currentImpl = _getImplementation(proxy);
+        if (currentImpl == address(0) || currentImpl.code.length == 0) {
+            revert("Current implementation invalid");
+        }
+        address owner = _ownerOf(proxy);
+        if (owner != deployer) {
+            revert("DEPLOYER_ADDRESS is not proxy owner");
+        }
         console2.log("===========================================");
         console2.log("  Agent Bonds UUPS Upgrade");
         console2.log("===========================================");
         console2.log("Target:", target);
         console2.log("Proxy:", proxy);
+        console2.log("Proxy owner:", owner);
         console2.log("Current impl:", currentImpl);
 
         vm.startBroadcast(deployer);
-
         address newImpl = _resolveOrDeploy(target);
+        _assertTargetCompatibility(target, newImpl);
         if (newImpl == currentImpl) revert("Already on this implementation");
 
         console2.log("New impl:", newImpl);
-
         _upgradeProxy(target, proxy, newImpl);
-
         vm.stopBroadcast();
 
         address verifyImpl = _getImplementation(proxy);
@@ -50,6 +57,7 @@ contract Upgrade is Script {
     }
 
     function validateOnly() external view {
+        _requireExpectedChainId();
         address deployer = vm.envAddress("DEPLOYER_ADDRESS");
         string memory target = vm.envString("TARGET");
         address proxy = _resolveProxy(target);
@@ -79,6 +87,7 @@ contract Upgrade is Script {
         if (provided != address(0)) {
             if (provided.code.length == 0) revert("NEW_IMPLEMENTATION has no code");
             if (provided == currentImpl) revert("Already on this implementation");
+            _assertTargetCompatibility(target, provided);
             console2.log("New impl override:", provided);
         } else {
             console2.log("NEW_IMPLEMENTATION not set (script will deploy a fresh implementation)");
@@ -133,6 +142,37 @@ contract Upgrade is Script {
         }
     }
 
+    function _assertTargetCompatibility(string memory target, address implementation) private view {
+        if (_proxiableUuid(implementation) != ERC1967_IMPLEMENTATION_SLOT) {
+            revert("Implementation proxiableUUID mismatch");
+        }
+
+        bytes32 t = keccak256(bytes(target));
+        if (t == keccak256("manager")) {
+            _requireProbeSuccess(implementation, abi.encodeWithSignature("validationFinalityPolicy()"), "manager probe failed");
+            _requireProbeSuccess(implementation, abi.encodeWithSignature("statusLookupFailurePolicy()"), "manager probe failed");
+            return;
+        }
+        if (t == keccak256("scorer")) {
+            _requireProbeSuccess(implementation, abi.encodeWithSignature("priorValue()"), "scorer probe failed");
+            _requireProbeSuccess(implementation, abi.encodeWithSignature("slashMultiplierBps()"), "scorer probe failed");
+            return;
+        }
+
+        revert("TARGET must be 'manager' or 'scorer'");
+    }
+
+    function _proxiableUuid(address implementation) private view returns (bytes32 uuid) {
+        (bool ok, bytes memory data) = implementation.staticcall(abi.encodeWithSignature("proxiableUUID()"));
+        if (!ok || data.length < 32) revert("Implementation missing proxiableUUID");
+        uuid = abi.decode(data, (bytes32));
+    }
+
+    function _requireProbeSuccess(address implementation, bytes memory payload, string memory err) private view {
+        (bool ok,) = implementation.staticcall(payload);
+        if (!ok) revert(err);
+    }
+
     function _getImplementation(address proxy) private view returns (address impl) {
         impl = address(uint160(uint256(vm.load(proxy, ERC1967_IMPLEMENTATION_SLOT))));
     }
@@ -165,6 +205,13 @@ contract Upgrade is Script {
             return v;
         } catch {
             return address(0);
+        }
+    }
+
+    function _requireExpectedChainId() private view {
+        uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
+        if (block.chainid != expectedChainId) {
+            revert("EXPECTED_CHAIN_ID mismatch");
         }
     }
 }

@@ -35,6 +35,7 @@ Signing:
 
 Environment Variables:
     DEPLOYER_ADDRESS          Sender address (required for Ledger, auto-derived for keystore)
+    OWNER_ADDRESS             Governance owner address for ownership handoff
     IDENTITY_REGISTRY         ERC-8004 Identity Registry address
     VALIDATION_REGISTRY       ERC-8004 Validation Registry address
     SETTLEMENT_TOKEN          ERC-20 settlement token address (non-zero)
@@ -193,7 +194,9 @@ cmd_preflight() {
 cmd_dry_run() {
     local network="$1"
     local rpc_url
+    local expected_chain_id
     rpc_url=$(get_rpc_url "$network")
+    expected_chain_id=$(get_chain_id "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
     verify_rpc_chain "$network" "$rpc_url"
@@ -207,7 +210,7 @@ cmd_dry_run() {
     log "Running dry-run for $network..."
     log "Output will be saved to: $output_file"
 
-    forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
+    EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         -vvvv 2>&1 | tee "$output_file"
@@ -232,7 +235,9 @@ cmd_dry_run() {
 cmd_deploy() {
     local network="$1"
     local rpc_url
+    local expected_chain_id
     rpc_url=$(get_rpc_url "$network")
+    expected_chain_id=$(get_chain_id "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
     verify_rpc_chain "$network" "$rpc_url"
@@ -245,21 +250,22 @@ cmd_deploy() {
     log "Network: $network"
     log ""
 
-    if [[ "$network" == "mainnet" ]]; then
+    if [[ "$network" == "mainnet" || "$network" == "base" ]]; then
         echo ""
         echo "========================================"
-        echo "  WARNING: MAINNET DEPLOYMENT"
+        echo "  WARNING: PRODUCTION DEPLOYMENT ($network)"
         echo "========================================"
         echo ""
-        read -p "Type 'DEPLOY MAINNET' to confirm: " confirmation
-        [[ "$confirmation" != "DEPLOY MAINNET" ]] && error "Deployment cancelled"
+        local expected_confirmation="DEPLOY ${network^^}"
+        read -p "Type '$expected_confirmation' to confirm: " confirmation
+        [[ "$confirmation" != "$expected_confirmation" ]] && error "Deployment cancelled"
     fi
 
     ensure_deployments_dir
 
     resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
 
-    forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
+    EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         --broadcast \
@@ -290,7 +296,9 @@ cmd_upgrade() {
     local network="$1"
     local target="$2"
     local rpc_url
+    local expected_chain_id
     rpc_url=$(get_rpc_url "$network")
+    expected_chain_id=$(get_chain_id "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
     [[ -z "$target" ]] && error "--target required (manager or scorer)"
@@ -302,20 +310,21 @@ cmd_upgrade() {
     fi
 
     log "Running upgrade preflight checks..."
-    TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
+    EXPECTED_CHAIN_ID="$expected_chain_id" TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         --sig "validateOnly()" \
         -vvv
 
-    if [[ "$network" == "mainnet" ]]; then
+    if [[ "$network" == "mainnet" || "$network" == "base" ]]; then
         echo ""
         echo "========================================"
-        echo "  WARNING: MAINNET UPGRADE"
+        echo "  WARNING: PRODUCTION UPGRADE ($network)"
         echo "========================================"
         echo ""
-        read -p "Type 'UPGRADE MAINNET' to confirm: " confirmation
-        [[ "$confirmation" != "UPGRADE MAINNET" ]] && error "Upgrade cancelled"
+        local expected_confirmation="UPGRADE ${network^^}"
+        read -p "Type '$expected_confirmation' to confirm: " confirmation
+        [[ "$confirmation" != "$expected_confirmation" ]] && error "Upgrade cancelled"
     fi
 
     log "Upgrading $target on $network..."
@@ -324,7 +333,7 @@ cmd_upgrade() {
         resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
     fi
 
-    TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
+    EXPECTED_CHAIN_ID="$expected_chain_id" TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         --broadcast \

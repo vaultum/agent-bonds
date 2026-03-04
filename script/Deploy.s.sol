@@ -14,6 +14,7 @@ contract Deploy is Script {
 
     struct DeployConfig {
         address deployer;
+        address ownerAddress;
         address identityRegistry;
         address validationRegistry;
         address settlementToken;
@@ -34,6 +35,7 @@ contract Deploy is Script {
     }
 
     function run() external {
+        _requireExpectedChainId();
         DeployConfig memory config = _loadConfig();
         _validateConfig(config);
 
@@ -97,6 +99,16 @@ contract Deploy is Script {
             manager.setStatusLookupFailurePolicy(config.statusLookupFailurePolicy);
         }
 
+        if (config.ownerAddress != config.deployer) {
+            scorer.transferOwnership(config.ownerAddress);
+            manager.transferOwnership(config.ownerAddress);
+            if (scorer.pendingOwner() != config.ownerAddress) revert("Scorer pending owner mismatch");
+            if (manager.pendingOwner() != config.ownerAddress) revert("Manager pending owner mismatch");
+            console2.log("Ownership transfer initiated to:", config.ownerAddress);
+        } else {
+            console2.log("OWNER_ADDRESS matches DEPLOYER_ADDRESS; skipping ownership transfer");
+        }
+
         vm.stopBroadcast();
 
         _writeArtifacts(outputPath, d, config);
@@ -105,6 +117,7 @@ contract Deploy is Script {
 
     function _loadConfig() private view returns (DeployConfig memory c) {
         c.deployer = vm.envAddress("DEPLOYER_ADDRESS");
+        c.ownerAddress = vm.envAddress("OWNER_ADDRESS");
         c.identityRegistry = vm.envAddress("IDENTITY_REGISTRY");
         c.validationRegistry = vm.envAddress("VALIDATION_REGISTRY");
         c.settlementToken = vm.envAddress("SETTLEMENT_TOKEN");
@@ -141,6 +154,7 @@ contract Deploy is Script {
 
     function _validateConfig(DeployConfig memory c) private view {
         if (c.deployer == address(0)) revert("DEPLOYER_ADDRESS is zero");
+        if (c.ownerAddress == address(0)) revert("OWNER_ADDRESS is zero");
         if (c.identityRegistry == address(0)) revert("IDENTITY_REGISTRY is zero");
         if (c.validationRegistry == address(0)) revert("VALIDATION_REGISTRY is zero");
         if (c.settlementToken == address(0)) revert("SETTLEMENT_TOKEN is zero");
@@ -161,6 +175,7 @@ contract Deploy is Script {
 
         if (c.identityRegistry.code.length == 0) revert("IDENTITY_REGISTRY has no code");
         if (c.validationRegistry.code.length == 0) revert("VALIDATION_REGISTRY has no code");
+        if (c.settlementToken.code.length == 0) revert("SETTLEMENT_TOKEN has no code");
     }
 
     function _writeArtifacts(string memory path, Deployment memory d, DeployConfig memory c) private {
@@ -175,6 +190,7 @@ contract Deploy is Script {
         json = vm.serializeAddress(key, "identityRegistry", c.identityRegistry);
         json = vm.serializeAddress(key, "validationRegistry", c.validationRegistry);
         json = vm.serializeAddress(key, "settlementToken", c.settlementToken);
+        json = vm.serializeAddress(key, "ownerAddress", c.ownerAddress);
         json = vm.serializeUint(key, "scorerPriorValue", c.scorerPriorValue);
         json = vm.serializeUint(key, "scorerSlashMultiplierBps", c.scorerSlashMultiplierBps);
         json = vm.serializeUint(key, "disputePeriod", c.disputePeriod);
@@ -190,6 +206,7 @@ contract Deploy is Script {
 
     function _logConfig(DeployConfig memory c) private pure {
         console2.log("Deployer:", c.deployer);
+        console2.log("Owner Address:", c.ownerAddress);
         console2.log("Identity Registry:", c.identityRegistry);
         console2.log("Validation Registry:", c.validationRegistry);
         console2.log("Settlement Token:", c.settlementToken);
@@ -212,6 +229,13 @@ contract Deploy is Script {
             }
         } catch {
             return defaultValue;
+        }
+    }
+
+    function _requireExpectedChainId() private view {
+        uint256 expectedChainId = vm.envUint("EXPECTED_CHAIN_ID");
+        if (block.chainid != expectedChainId) {
+            revert("EXPECTED_CHAIN_ID mismatch");
         }
     }
 

@@ -22,6 +22,16 @@ contract PostDeploymentSmokeTest is Script {
         console2.log("===========================================");
         console2.log("");
 
+        address expectedOwner = vm.envAddress("OWNER_ADDRESS");
+        if (expectedOwner == address(0)) {
+            revert("OWNER_ADDRESS missing");
+        }
+        address expectedDeployer = _envAddress("DEPLOYER_ADDRESS");
+
+        address expectedIdentityRegistry = vm.envAddress("IDENTITY_REGISTRY");
+        address expectedValidationRegistry = vm.envAddress("VALIDATION_REGISTRY");
+        address expectedSettlementToken = vm.envAddress("SETTLEMENT_TOKEN");
+
         (address managerProxy, address scorerProxy) = _loadAddresses();
         if (managerProxy == address(0) || scorerProxy == address(0)) {
             revert("Deployment addresses not found");
@@ -29,10 +39,23 @@ contract PostDeploymentSmokeTest is Script {
 
         console2.log("Manager proxy:", managerProxy);
         console2.log("Scorer proxy:", scorerProxy);
+        console2.log("Expected owner:", expectedOwner);
+        console2.log("Expected deployer:", expectedDeployer);
+        console2.log("Expected identity registry:", expectedIdentityRegistry);
+        console2.log("Expected validation registry:", expectedValidationRegistry);
+        console2.log("Expected settlement token:", expectedSettlementToken);
         console2.log("");
 
-        _testScorerProxy(scorerProxy);
-        _testManagerProxy(managerProxy, scorerProxy);
+        _testScorerProxy(scorerProxy, expectedOwner, expectedDeployer);
+        _testManagerProxy(
+            managerProxy,
+            scorerProxy,
+            expectedOwner,
+            expectedDeployer,
+            expectedIdentityRegistry,
+            expectedValidationRegistry,
+            expectedSettlementToken
+        );
 
         console2.log("");
         console2.log("===========================================");
@@ -46,7 +69,7 @@ contract PostDeploymentSmokeTest is Script {
         console2.log("===========================================");
     }
 
-    function _testScorerProxy(address proxy) private {
+    function _testScorerProxy(address proxy, address expectedOwner, address expectedDeployer) private {
         console2.log("--- ReputationScorer ---");
 
         _check("Scorer: has code", "OK", proxy.code.length > 0);
@@ -58,6 +81,21 @@ contract PostDeploymentSmokeTest is Script {
 
         address owner = scorer.owner();
         _check("Scorer: owner set", vm.toString(owner), owner != address(0));
+
+        address pendingOwner = scorer.pendingOwner();
+        bool ownerAligned = _isExpectedOwnershipState(owner, pendingOwner, expectedOwner, expectedDeployer);
+        _check(
+            "Scorer: expected owner aligned",
+            string.concat(
+                "owner=",
+                vm.toString(owner),
+                ", pending=",
+                vm.toString(pendingOwner),
+                ", deployer=",
+                vm.toString(expectedDeployer)
+            ),
+            ownerAligned
+        );
 
         address bondManager = address(scorer.BOND_MANAGER());
         _check("Scorer: bond manager set", vm.toString(bondManager), bondManager != address(0));
@@ -75,7 +113,15 @@ contract PostDeploymentSmokeTest is Script {
         console2.log("");
     }
 
-    function _testManagerProxy(address proxy, address expectedScorer) private {
+    function _testManagerProxy(
+        address proxy,
+        address expectedScorer,
+        address expectedOwner,
+        address expectedDeployer,
+        address expectedIdentityRegistry,
+        address expectedValidationRegistry,
+        address expectedSettlementToken
+    ) private {
         console2.log("--- AgentBondManager ---");
 
         _check("Manager: has code", "OK", proxy.code.length > 0);
@@ -88,17 +134,32 @@ contract PostDeploymentSmokeTest is Script {
         address owner = manager.owner();
         _check("Manager: owner set", vm.toString(owner), owner != address(0));
 
+        address pendingOwner = manager.pendingOwner();
+        bool ownerAligned = _isExpectedOwnershipState(owner, pendingOwner, expectedOwner, expectedDeployer);
+        _check(
+            "Manager: expected owner aligned",
+            string.concat(
+                "owner=",
+                vm.toString(owner),
+                ", pending=",
+                vm.toString(pendingOwner),
+                ", deployer=",
+                vm.toString(expectedDeployer)
+            ),
+            ownerAligned
+        );
+
         address identity = address(manager.IDENTITY_REGISTRY());
-        _check("Manager: identity registry", vm.toString(identity), identity != address(0));
+        _check("Manager: identity registry", vm.toString(identity), identity == expectedIdentityRegistry);
 
         address validation = address(manager.VALIDATION_REGISTRY());
-        _check("Manager: validation registry", vm.toString(validation), validation != address(0));
+        _check("Manager: validation registry", vm.toString(validation), validation == expectedValidationRegistry);
 
         address scorer = address(manager.SCORER());
         _check("Manager: scorer matches", vm.toString(scorer), scorer == expectedScorer);
 
         address settlementToken = address(manager.settlementToken());
-        _check("Manager: settlement token set", vm.toString(settlementToken), settlementToken != address(0));
+        _check("Manager: settlement token set", vm.toString(settlementToken), settlementToken == expectedSettlementToken);
 
         address scorerBondManager = address(ReputationScorer(expectedScorer).BOND_MANAGER());
         _check("Scorer: points to manager", vm.toString(scorerBondManager), scorerBondManager == proxy);
@@ -198,6 +259,22 @@ contract PostDeploymentSmokeTest is Script {
         } catch {
             return (false, 0);
         }
+    }
+
+    function _isExpectedOwnershipState(
+        address owner,
+        address pendingOwner,
+        address expectedOwner,
+        address expectedDeployer
+    ) private pure returns (bool) {
+        if (owner == expectedOwner) {
+            return pendingOwner == address(0);
+        }
+        if (expectedDeployer != address(0) && owner == expectedDeployer) {
+            return pendingOwner == expectedOwner;
+        }
+
+        return false;
     }
 
     function _isBlank(string memory value) private pure returns (bool) {

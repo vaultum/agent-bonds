@@ -26,6 +26,7 @@ contract PreFlightCheck is Script {
         console2.log("");
 
         _checkDeployer();
+        _checkGovernanceOwner();
         _checkRegistries();
         _checkSettlementToken();
         _checkScorerParams();
@@ -36,6 +37,27 @@ contract PreFlightCheck is Script {
         _printSummary();
 
         if (failCount > 0) revert("Pre-flight checks failed");
+    }
+
+    function _checkGovernanceOwner() private {
+        console2.log("Checking governance owner...");
+
+        address ownerAddress = _envAddress("OWNER_ADDRESS");
+        if (ownerAddress == address(0)) {
+            _record(false, "OWNER_ADDRESS: MISSING");
+            console2.log("");
+            return;
+        }
+
+        _record(true, string.concat("OWNER_ADDRESS: ", vm.toString(ownerAddress)));
+        address deployer = _envAddress("DEPLOYER_ADDRESS");
+        if (deployer != address(0) && ownerAddress == deployer) {
+            _record(true, "OWNER_ADDRESS matches DEPLOYER_ADDRESS (no handoff needed)");
+        } else {
+            _record(true, "Ownership handoff target configured");
+        }
+
+        console2.log("");
     }
 
     function _checkDeployer() private {
