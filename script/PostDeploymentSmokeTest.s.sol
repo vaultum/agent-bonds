@@ -233,7 +233,7 @@ contract PostDeploymentSmokeTest is Script {
 
         if (manager != address(0) && scorer != address(0)) return (manager, scorer);
 
-        string memory path = string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid), ".json");
+        string memory path = _deploymentArtifactsPath();
         try vm.readFile(path) returns (string memory raw) {
             if (manager == address(0)) manager = _parseAddress(raw, ".managerProxy");
             if (scorer == address(0)) scorer = _parseAddress(raw, ".scorerProxy");
@@ -294,6 +294,25 @@ contract PostDeploymentSmokeTest is Script {
             return v;
         } catch {
             return address(0);
+        }
+    }
+
+    function _deploymentArtifactsPath() private view returns (string memory) {
+        string memory basePath =
+            string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid));
+        string memory tag = _saltTag();
+        if (bytes(tag).length == 0) {
+            return string.concat(basePath, ".json");
+        }
+
+        return string.concat(basePath, "-", vm.toString(keccak256(bytes(tag))), ".json");
+    }
+
+    function _saltTag() private view returns (string memory tag) {
+        try vm.envString("SALT_TAG") returns (string memory configuredTag) {
+            return configuredTag;
+        } catch {
+            return "";
         }
     }
 }

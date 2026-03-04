@@ -17,11 +17,13 @@ Commands:
     dry-run         Execute deployment in dry-run mode (no broadcast)
     deploy          Execute deployment with broadcast
     smoke-test      Run post-deployment smoke tests
+    predict         Predict deterministic deployment addresses
     upgrade         Upgrade a proxy to new implementation
 
 Options:
     --network <network>   Target network (sepolia|base-sepolia|op-sepolia|mainnet|base)
     --env-file <file>     Environment file to source (default: .env)
+    --salt-tag <tag>      Version tag for deterministic salt derivation (e.g., v2, staging)
     --account <name>      Use Foundry keystore account for signing
     --target <target>     Upgrade target: manager or scorer
     --help                Show this help message
@@ -35,6 +37,8 @@ Signing:
 
 Environment Variables:
     DEPLOYER_ADDRESS          Sender address (required for Ledger, auto-derived for keystore)
+    DEPLOYMENT_SALT_SECRET    Secret for deterministic deployment salt derivation
+    SALT_TAG                  Optional version tag for deterministic salts
     OWNER_ADDRESS             Governance owner address for ownership handoff
     IDENTITY_REGISTRY         ERC-8004 Identity Registry address
     VALIDATION_REGISTRY       ERC-8004 Validation Registry address
@@ -59,6 +63,12 @@ Examples:
 
     # Deploy with Foundry keystore
     $0 deploy --network base-sepolia --account deployer
+
+    # Deploy a new version namespace with SALT_TAG
+    $0 deploy --network base-sepolia --salt-tag v2
+
+    # Predict deterministic addresses without deploying
+    $0 predict --network base-sepolia --salt-tag v2
 
     # Post-deployment verification
     $0 smoke-test --network base-sepolia
@@ -173,7 +183,9 @@ ensure_deployments_dir() {
 
 cmd_preflight() {
     local network="$1"
+    local salt_tag="$2"
     local rpc_url
+    local extra_env=""
     rpc_url=$(get_rpc_url "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
@@ -185,7 +197,11 @@ cmd_preflight() {
 
     log "Running pre-flight checks for $network..."
 
-    forge script "$PROJECT_ROOT/script/PreFlightCheck.s.sol:PreFlightCheck" \
+    if [[ -n "$salt_tag" ]]; then
+        extra_env="SALT_TAG=$salt_tag"
+    fi
+
+    env $extra_env forge script "$PROJECT_ROOT/script/PreFlightCheck.s.sol:PreFlightCheck" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         -vvv
@@ -193,8 +209,10 @@ cmd_preflight() {
 
 cmd_dry_run() {
     local network="$1"
+    local salt_tag="$2"
     local rpc_url
     local expected_chain_id
+    local extra_env=""
     rpc_url=$(get_rpc_url "$network")
     expected_chain_id=$(get_chain_id "$network")
 
@@ -210,7 +228,11 @@ cmd_dry_run() {
     log "Running dry-run for $network..."
     log "Output will be saved to: $output_file"
 
-    EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
+    if [[ -n "$salt_tag" ]]; then
+        extra_env="SALT_TAG=$salt_tag"
+    fi
+
+    env $extra_env EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         -vvvv 2>&1 | tee "$output_file"
@@ -234,8 +256,10 @@ cmd_dry_run() {
 
 cmd_deploy() {
     local network="$1"
+    local salt_tag="$2"
     local rpc_url
     local expected_chain_id
+    local extra_env=""
     rpc_url=$(get_rpc_url "$network")
     expected_chain_id=$(get_chain_id "$network")
 
@@ -243,11 +267,14 @@ cmd_deploy() {
     verify_rpc_chain "$network" "$rpc_url"
 
     log "Running pre-flight checks first..."
-    cmd_preflight "$network"
+    cmd_preflight "$network" "$salt_tag"
 
     log ""
     log "Pre-flight passed. Proceeding with deployment..."
     log "Network: $network"
+    if [[ -n "$salt_tag" ]]; then
+        log "SALT_TAG: $salt_tag"
+    fi
     log ""
 
     if [[ "$network" == "mainnet" || "$network" == "base" ]]; then
@@ -265,7 +292,11 @@ cmd_deploy() {
 
     resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
 
-    EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
+    if [[ -n "$salt_tag" ]]; then
+        extra_env="SALT_TAG=$salt_tag"
+    fi
+
+    env $extra_env EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         --broadcast \
@@ -273,12 +304,14 @@ cmd_deploy() {
         -vvvv
 
     log "Deployment complete. Running smoke tests..."
-    cmd_smoke_test "$network"
+    cmd_smoke_test "$network" "$salt_tag"
 }
 
 cmd_smoke_test() {
     local network="$1"
+    local salt_tag="$2"
     local rpc_url
+    local extra_env=""
     rpc_url=$(get_rpc_url "$network")
 
     [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
@@ -286,7 +319,11 @@ cmd_smoke_test() {
 
     log "Running post-deployment smoke tests for $network..."
 
-    forge script "$PROJECT_ROOT/script/PostDeploymentSmokeTest.s.sol:PostDeploymentSmokeTest" \
+    if [[ -n "$salt_tag" ]]; then
+        extra_env="SALT_TAG=$salt_tag"
+    fi
+
+    env $extra_env forge script "$PROJECT_ROOT/script/PostDeploymentSmokeTest.s.sol:PostDeploymentSmokeTest" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         -vvv
@@ -295,8 +332,10 @@ cmd_smoke_test() {
 cmd_upgrade() {
     local network="$1"
     local target="$2"
+    local salt_tag="$3"
     local rpc_url
     local expected_chain_id
+    local extra_env=""
     rpc_url=$(get_rpc_url "$network")
     expected_chain_id=$(get_chain_id "$network")
 
@@ -310,7 +349,11 @@ cmd_upgrade() {
     fi
 
     log "Running upgrade preflight checks..."
-    EXPECTED_CHAIN_ID="$expected_chain_id" TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
+    if [[ -n "$salt_tag" ]]; then
+        extra_env="SALT_TAG=$salt_tag"
+    fi
+
+    env $extra_env EXPECTED_CHAIN_ID="$expected_chain_id" TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         --sig "validateOnly()" \
@@ -333,7 +376,7 @@ cmd_upgrade() {
         resolve_signer_args "${DEPLOYER_ADDRESS:-}" "$network"
     fi
 
-    EXPECTED_CHAIN_ID="$expected_chain_id" TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
+    env $extra_env EXPECTED_CHAIN_ID="$expected_chain_id" TARGET="$target" forge script "$PROJECT_ROOT/script/Upgrade.s.sol:Upgrade" \
         --root "$PROJECT_ROOT" \
         --rpc-url "$rpc_url" \
         --broadcast \
@@ -341,7 +384,32 @@ cmd_upgrade() {
         -vvvv
 
     log "Upgrade complete. Running smoke tests..."
-    cmd_smoke_test "$network"
+    cmd_smoke_test "$network" "$salt_tag"
+}
+
+cmd_predict() {
+    local network="$1"
+    local salt_tag="$2"
+    local rpc_url
+    local expected_chain_id
+    local extra_env=""
+    rpc_url=$(get_rpc_url "$network")
+    expected_chain_id=$(get_chain_id "$network")
+
+    [[ -z "$rpc_url" ]] && error "RPC URL not set for $network"
+    verify_rpc_chain "$network" "$rpc_url"
+
+    log "Predicting deterministic deployment addresses for $network..."
+
+    if [[ -n "$salt_tag" ]]; then
+        extra_env="SALT_TAG=$salt_tag"
+    fi
+
+    env $extra_env EXPECTED_CHAIN_ID="$expected_chain_id" forge script "$PROJECT_ROOT/script/Deploy.s.sol:Deploy" \
+        --root "$PROJECT_ROOT" \
+        --rpc-url "$rpc_url" \
+        --sig "predictAddresses()" \
+        -vvv
 }
 
 main() {
@@ -349,10 +417,11 @@ main() {
     local network="sepolia"
     local env_file="$PROJECT_ROOT/.env"
     local target=""
+    local salt_tag=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            preflight|dry-run|deploy|smoke-test|upgrade)
+            preflight|dry-run|deploy|smoke-test|predict|upgrade)
                 command="$1"
                 shift
                 ;;
@@ -366,6 +435,10 @@ main() {
                 ;;
             --target)
                 target="$2"
+                shift 2
+                ;;
+            --salt-tag)
+                salt_tag="$2"
                 shift 2
                 ;;
             --account)
@@ -386,12 +459,18 @@ main() {
 
     load_env "$env_file"
 
+    if [[ -n "$salt_tag" ]]; then
+        export SALT_TAG="$salt_tag"
+        log "Using SALT_TAG: $salt_tag"
+    fi
+
     case "$command" in
-        preflight)   cmd_preflight "$network" ;;
-        dry-run)     cmd_dry_run "$network" ;;
-        deploy)      cmd_deploy "$network" ;;
-        smoke-test)  cmd_smoke_test "$network" ;;
-        upgrade)     cmd_upgrade "$network" "$target" ;;
+        preflight)   cmd_preflight "$network" "$salt_tag" ;;
+        dry-run)     cmd_dry_run "$network" "$salt_tag" ;;
+        deploy)      cmd_deploy "$network" "$salt_tag" ;;
+        smoke-test)  cmd_smoke_test "$network" "$salt_tag" ;;
+        predict)     cmd_predict "$network" "$salt_tag" ;;
+        upgrade)     cmd_upgrade "$network" "$target" "$salt_tag" ;;
         *)           error "Unknown command: $command" ;;
     esac
 }

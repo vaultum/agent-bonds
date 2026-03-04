@@ -11,6 +11,15 @@ import {ReputationScorer} from "../src/ReputationScorer.sol";
 /// @notice Deploys ReputationScorer and AgentBondManager behind ERC-1967 proxies.
 contract Deploy is Script {
     uint256 private constant MIN_DISPUTE_PERIOD = 1 hours;
+    bytes32 private constant ERC1967_IMPLEMENTATION_SLOT =
+        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+    address private constant DETERMINISTIC_DEPLOYMENT_PROXY =
+        0x4e59b44847b379578588920cA78FbF26c0B4956C;
+
+    bytes32 private constant BASE_SCORER_IMPL_SALT = keccak256("agent-bonds.scorer.impl");
+    bytes32 private constant BASE_SCORER_PROXY_SALT = keccak256("agent-bonds.scorer.proxy");
+    bytes32 private constant BASE_MANAGER_IMPL_SALT = keccak256("agent-bonds.manager.impl");
+    bytes32 private constant BASE_MANAGER_PROXY_SALT = keccak256("agent-bonds.manager.proxy");
 
     struct DeployConfig {
         address deployer;
@@ -38,60 +47,112 @@ contract Deploy is Script {
         _requireExpectedChainId();
         DeployConfig memory config = _loadConfig();
         _validateConfig(config);
+        bytes32 saltSecret = _loadSaltSecret();
 
         console2.log("===========================================");
         console2.log("  Agent Bonds Deployment");
         console2.log("===========================================");
         _logConfig(config);
+        _logSaltInfo();
 
         string memory outDir = string.concat(vm.projectRoot(), "/deployments");
-        string memory outputPath = string.concat(outDir, "/", vm.toString(block.chainid), ".json");
+        string memory outputPath = _deploymentArtifactsPath();
         vm.createDir(outDir, true);
+
+        bytes32 scorerImplSalt = _deriveSalt(BASE_SCORER_IMPL_SALT, saltSecret);
+        bytes32 scorerProxySalt = _deriveSalt(BASE_SCORER_PROXY_SALT, saltSecret);
+        bytes32 managerImplSalt = _deriveSalt(BASE_MANAGER_IMPL_SALT, saltSecret);
+        bytes32 managerProxySalt = _deriveSalt(BASE_MANAGER_PROXY_SALT, saltSecret);
+
+        address predictedScorerImpl = _predictCreate2Address(type(ReputationScorer).creationCode, scorerImplSalt);
+        address predictedScorerProxy =
+            _predictCreate2Address(_scorerProxyCreationCode(predictedScorerImpl), scorerProxySalt);
+        address predictedManagerImpl = _predictCreate2Address(type(AgentBondManager).creationCode, managerImplSalt);
+        address predictedManagerProxy =
+            _predictCreate2Address(_managerProxyCreationCode(predictedManagerImpl), managerProxySalt);
+
+        _assertExistingArtifactCompatibility(outputPath, predictedScorerProxy, predictedManagerProxy);
 
         vm.startBroadcast(config.deployer);
 
         Deployment memory d;
 
-        d.scorerImpl = address(new ReputationScorer());
+        d.scorerImpl = _deployDeterministic(
+            type(ReputationScorer).creationCode,
+            scorerImplSalt,
+            bytes32(0),
+            "ReputationScorer impl"
+        );
+        _assertScorerImplementation(d.scorerImpl);
         console2.log("ReputationScorer impl:", d.scorerImpl);
 
-        d.scorerProxy = address(
-            new ERC1967Proxy(
-                d.scorerImpl,
-                abi.encodeCall(
-                    ReputationScorer.initialize,
-                    (config.scorerPriorValue, config.scorerSlashMultiplierBps)
-                )
-            )
+        d.scorerProxy = _deployDeterministic(
+            _scorerProxyCreationCode(d.scorerImpl),
+            scorerProxySalt,
+            keccak256(type(ERC1967Proxy).runtimeCode),
+            "ReputationScorer proxy"
         );
+        _assertProxyImplementation(d.scorerProxy, d.scorerImpl, "ReputationScorer proxy implementation mismatch");
         console2.log("ReputationScorer proxy:", d.scorerProxy);
 
-        d.managerImpl = address(new AgentBondManager());
+        d.managerImpl = _deployDeterministic(
+            type(AgentBondManager).creationCode,
+            managerImplSalt,
+            bytes32(0),
+            "AgentBondManager impl"
+        );
+        _assertManagerImplementation(d.managerImpl);
         console2.log("AgentBondManager impl:", d.managerImpl);
 
-        d.managerProxy = address(
-            new ERC1967Proxy(
-                d.managerImpl,
-                abi.encodeCall(
-                    AgentBondManager.initialize,
-                    (
-                        config.identityRegistry,
-                        config.validationRegistry,
-                        d.scorerProxy,
-                        config.settlementToken,
-                        config.disputePeriod,
-                        config.minPassingScore,
-                        config.slashBps
-                    )
-                )
-            )
+        d.managerProxy = _deployDeterministic(
+            _managerProxyCreationCode(d.managerImpl),
+            managerProxySalt,
+            keccak256(type(ERC1967Proxy).runtimeCode),
+            "AgentBondManager proxy"
         );
+        _assertProxyImplementation(d.managerProxy, d.managerImpl, "AgentBondManager proxy implementation mismatch");
         console2.log("AgentBondManager proxy:", d.managerProxy);
 
         ReputationScorer scorer = ReputationScorer(d.scorerProxy);
-        scorer.setBondManager(d.managerProxy);
+        if (scorer.priorValue() == 0) {
+            scorer.initialize(config.scorerPriorValue, config.scorerSlashMultiplierBps);
+        }
+        if (scorer.priorValue() != config.scorerPriorValue) {
+            revert("Scorer prior value mismatch");
+        }
+        if (scorer.slashMultiplierBps() != config.scorerSlashMultiplierBps) {
+            revert("Scorer slash multiplier mismatch");
+        }
+        if (address(scorer.BOND_MANAGER()) == address(0)) {
+            scorer.setBondManager(d.managerProxy);
+        } else if (address(scorer.BOND_MANAGER()) != d.managerProxy) {
+            revert("Scorer BOND_MANAGER mismatch");
+        }
 
         AgentBondManager manager = AgentBondManager(d.managerProxy);
+        if (manager.owner() == address(0)) {
+            manager.initialize(
+                config.identityRegistry,
+                config.validationRegistry,
+                d.scorerProxy,
+                config.settlementToken,
+                config.disputePeriod,
+                config.minPassingScore,
+                config.slashBps
+            );
+        }
+        if (address(manager.IDENTITY_REGISTRY()) != config.identityRegistry) {
+            revert("Manager identity registry mismatch");
+        }
+        if (address(manager.VALIDATION_REGISTRY()) != config.validationRegistry) {
+            revert("Manager validation registry mismatch");
+        }
+        if (address(manager.SCORER()) != d.scorerProxy) {
+            revert("Manager scorer mismatch");
+        }
+        if (address(manager.settlementToken()) != config.settlementToken) {
+            revert("Manager settlement token mismatch");
+        }
         if (uint8(manager.validationFinalityPolicy()) != config.validationFinalityPolicy) {
             manager.setValidationFinalityPolicy(config.validationFinalityPolicy);
         }
@@ -100,10 +161,24 @@ contract Deploy is Script {
         }
 
         if (config.ownerAddress != config.deployer) {
-            scorer.transferOwnership(config.ownerAddress);
-            manager.transferOwnership(config.ownerAddress);
-            if (scorer.pendingOwner() != config.ownerAddress) revert("Scorer pending owner mismatch");
-            if (manager.pendingOwner() != config.ownerAddress) revert("Manager pending owner mismatch");
+            if (scorer.owner() == config.deployer && scorer.pendingOwner() == address(0)) {
+                scorer.transferOwnership(config.ownerAddress);
+            }
+            if (manager.owner() == config.deployer && manager.pendingOwner() == address(0)) {
+                manager.transferOwnership(config.ownerAddress);
+            }
+            if (scorer.owner() != config.ownerAddress && scorer.pendingOwner() != config.ownerAddress) {
+                revert("Scorer ownership state mismatch");
+            }
+            if (manager.owner() != config.ownerAddress && manager.pendingOwner() != config.ownerAddress) {
+                revert("Manager ownership state mismatch");
+            }
+            if (scorer.pendingOwner() != address(0) && scorer.pendingOwner() != config.ownerAddress) {
+                revert("Scorer pending owner mismatch");
+            }
+            if (manager.pendingOwner() != address(0) && manager.pendingOwner() != config.ownerAddress) {
+                revert("Manager pending owner mismatch");
+            }
             console2.log("Ownership transfer initiated to:", config.ownerAddress);
         } else {
             console2.log("OWNER_ADDRESS matches DEPLOYER_ADDRESS; skipping ownership transfer");
@@ -113,6 +188,32 @@ contract Deploy is Script {
 
         _writeArtifacts(outputPath, d, config);
         _logDeployment(d);
+    }
+
+    function predictAddresses() external view {
+        bytes32 saltSecret = _loadSaltSecret();
+        bytes32 scorerImplSalt = _deriveSalt(BASE_SCORER_IMPL_SALT, saltSecret);
+        bytes32 scorerProxySalt = _deriveSalt(BASE_SCORER_PROXY_SALT, saltSecret);
+        bytes32 managerImplSalt = _deriveSalt(BASE_MANAGER_IMPL_SALT, saltSecret);
+        bytes32 managerProxySalt = _deriveSalt(BASE_MANAGER_PROXY_SALT, saltSecret);
+
+        console2.log("===========================================");
+        console2.log("  Agent Bonds Deterministic Address Prediction");
+        console2.log("===========================================");
+        console2.log(
+            "ReputationScorer impl:",
+            _predictCreate2Address(type(ReputationScorer).creationCode, scorerImplSalt)
+        );
+        console2.log("ReputationScorer proxy:", _predictProxyAddressForScorer(scorerImplSalt, scorerProxySalt));
+        console2.log(
+            "AgentBondManager impl:",
+            _predictCreate2Address(type(AgentBondManager).creationCode, managerImplSalt)
+        );
+        console2.log(
+            "AgentBondManager proxy:",
+            _predictProxyAddressForManager(managerImplSalt, managerProxySalt)
+        );
+        console2.log("===========================================");
     }
 
     function _loadConfig() private view returns (DeployConfig memory c) {
@@ -176,6 +277,9 @@ contract Deploy is Script {
         if (c.identityRegistry.code.length == 0) revert("IDENTITY_REGISTRY has no code");
         if (c.validationRegistry.code.length == 0) revert("VALIDATION_REGISTRY has no code");
         if (c.settlementToken.code.length == 0) revert("SETTLEMENT_TOKEN has no code");
+        if (DETERMINISTIC_DEPLOYMENT_PROXY.code.length == 0) {
+            revert("Deterministic deployment proxy missing at 0x4e59b4...");
+        }
     }
 
     function _writeArtifacts(string memory path, Deployment memory d, DeployConfig memory c) private {
@@ -199,6 +303,12 @@ contract Deploy is Script {
         json = vm.serializeUint(key, "validationFinalityPolicy", uint256(c.validationFinalityPolicy));
         json = vm.serializeUint(key, "statusLookupFailurePolicy", uint256(c.statusLookupFailurePolicy));
         json = vm.serializeUint(key, "timestamp", block.timestamp);
+
+        try vm.envString("SALT_TAG") returns (string memory tag) {
+            if (bytes(tag).length > 0) {
+                json = vm.serializeString(key, "saltTag", tag);
+            }
+        } catch {}
 
         vm.writeJson(json, path);
         console2.log("Deployment saved to:", path);
@@ -229,6 +339,205 @@ contract Deploy is Script {
             }
         } catch {
             return defaultValue;
+        }
+    }
+
+    function _logSaltInfo() private view {
+        console2.log("Deterministic salt secret: configured");
+        try vm.envString("SALT_TAG") returns (string memory tag) {
+            if (bytes(tag).length > 0) {
+                console2.log("SALT_TAG:", tag);
+            }
+        } catch {}
+        console2.log("");
+    }
+
+    function _loadSaltSecret() private view returns (bytes32 secret) {
+        try vm.envBytes32("DEPLOYMENT_SALT_SECRET") returns (bytes32 s) {
+            if (s == bytes32(0)) revert("DEPLOYMENT_SALT_SECRET must be non-zero");
+            secret = s;
+        } catch {
+            revert("DEPLOYMENT_SALT_SECRET env var required");
+        }
+
+        try vm.envString("SALT_TAG") returns (string memory tag) {
+            if (bytes(tag).length > 0) {
+                secret = keccak256(abi.encodePacked(secret, tag));
+            }
+        } catch {}
+    }
+
+    function _deriveSalt(bytes32 baseSalt, bytes32 secret) private pure returns (bytes32) {
+        return keccak256(abi.encode(baseSalt, secret));
+    }
+
+    function _deploymentArtifactsPath() private view returns (string memory) {
+        string memory basePath =
+            string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid));
+        string memory tag = _saltTag();
+        if (bytes(tag).length == 0) {
+            return string.concat(basePath, ".json");
+        }
+
+        return string.concat(basePath, "-", vm.toString(keccak256(bytes(tag))), ".json");
+    }
+
+    function _saltTag() private view returns (string memory tag) {
+        try vm.envString("SALT_TAG") returns (string memory configuredTag) {
+            return configuredTag;
+        } catch {
+            return "";
+        }
+    }
+
+    function _deployDeterministic(
+        bytes memory creationCode,
+        bytes32 salt,
+        bytes32 expectedRuntimeHash,
+        string memory label
+    ) private returns (address deployed) {
+        deployed = _predictCreate2Address(creationCode, salt);
+        if (deployed.code.length > 0) {
+            if (expectedRuntimeHash != bytes32(0) && keccak256(deployed.code) != expectedRuntimeHash) {
+                revert(string.concat(label, " runtime hash mismatch at predicted address"));
+            }
+            console2.log(label, "already deployed at:", deployed);
+            return deployed;
+        }
+
+        (bool success, bytes memory returnData) = DETERMINISTIC_DEPLOYMENT_PROXY.call(
+            abi.encodePacked(salt, creationCode)
+        );
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(returnData, 0x20), mload(returnData))
+            }
+        }
+
+        if (deployed.code.length == 0) {
+            revert(string.concat(label, " deployment failed"));
+        }
+        if (expectedRuntimeHash != bytes32(0) && keccak256(deployed.code) != expectedRuntimeHash) {
+            revert(string.concat(label, " runtime hash mismatch after deployment"));
+        }
+    }
+
+    function _predictCreate2Address(bytes memory creationCode, bytes32 salt) private pure returns (address) {
+        bytes32 initCodeHash = keccak256(creationCode);
+        return address(
+            uint160(
+                uint256(
+                    keccak256(
+                        abi.encodePacked(bytes1(0xff), DETERMINISTIC_DEPLOYMENT_PROXY, salt, initCodeHash)
+                    )
+                )
+            )
+        );
+    }
+
+    function _assertProxyImplementation(address proxy, address expectedImplementation, string memory errorMessage)
+        private
+        view
+    {
+        address implementation = address(uint160(uint256(vm.load(proxy, ERC1967_IMPLEMENTATION_SLOT))));
+        if (implementation != expectedImplementation) {
+            revert(errorMessage);
+        }
+    }
+
+    function _assertScorerImplementation(address implementation) private view {
+        if (_proxiableUuid(implementation) != ERC1967_IMPLEMENTATION_SLOT) {
+            revert("Scorer implementation proxiableUUID mismatch");
+        }
+        _requireProbeSuccess(implementation, abi.encodeWithSignature("priorValue()"), "Scorer probe failed");
+        _requireProbeSuccess(
+            implementation,
+            abi.encodeWithSignature("slashMultiplierBps()"),
+            "Scorer probe failed"
+        );
+    }
+
+    function _assertManagerImplementation(address implementation) private view {
+        if (_proxiableUuid(implementation) != ERC1967_IMPLEMENTATION_SLOT) {
+            revert("Manager implementation proxiableUUID mismatch");
+        }
+        _requireProbeSuccess(
+            implementation,
+            abi.encodeWithSignature("validationFinalityPolicy()"),
+            "Manager probe failed"
+        );
+        _requireProbeSuccess(
+            implementation,
+            abi.encodeWithSignature("statusLookupFailurePolicy()"),
+            "Manager probe failed"
+        );
+    }
+
+    function _proxiableUuid(address implementation) private view returns (bytes32 uuid) {
+        (bool ok, bytes memory data) = implementation.staticcall(abi.encodeWithSignature("proxiableUUID()"));
+        if (!ok || data.length < 32) revert("Implementation missing proxiableUUID");
+        uuid = abi.decode(data, (bytes32));
+    }
+
+    function _requireProbeSuccess(address implementation, bytes memory payload, string memory err) private view {
+        (bool ok,) = implementation.staticcall(payload);
+        if (!ok) revert(err);
+    }
+
+    function _predictProxyAddressForScorer(bytes32 scorerImplSalt, bytes32 scorerProxySalt)
+        private
+        pure
+        returns (address)
+    {
+        address scorerImpl = _predictCreate2Address(type(ReputationScorer).creationCode, scorerImplSalt);
+        return _predictCreate2Address(_scorerProxyCreationCode(scorerImpl), scorerProxySalt);
+    }
+
+    function _predictProxyAddressForManager(bytes32 managerImplSalt, bytes32 managerProxySalt)
+        private
+        pure
+        returns (address)
+    {
+        address managerImpl = _predictCreate2Address(type(AgentBondManager).creationCode, managerImplSalt);
+        return _predictCreate2Address(_managerProxyCreationCode(managerImpl), managerProxySalt);
+    }
+
+    function _scorerProxyCreationCode(address scorerImpl) private pure returns (bytes memory) {
+        return abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(scorerImpl, bytes("")));
+    }
+
+    function _managerProxyCreationCode(address managerImpl) private pure returns (bytes memory) {
+        return abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(managerImpl, bytes("")));
+    }
+
+    function _assertExistingArtifactCompatibility(
+        string memory path,
+        address predictedScorerProxy,
+        address predictedManagerProxy
+    ) private view {
+        try vm.readFile(path) returns (string memory raw) {
+            address existingScorerProxy = _parseAddress(raw, ".scorerProxy");
+            address existingManagerProxy = _parseAddress(raw, ".managerProxy");
+            bool scorerLive = existingScorerProxy != address(0) && existingScorerProxy.code.length > 0;
+            bool managerLive = existingManagerProxy != address(0) && existingManagerProxy.code.length > 0;
+
+            if (scorerLive != managerLive) {
+                revert("Existing deployment artifact is partial");
+            }
+            if (!scorerLive) {
+                return;
+            }
+            if (existingScorerProxy != predictedScorerProxy || existingManagerProxy != predictedManagerProxy) {
+                revert("Existing deployment differs from deterministic prediction; use upgrade or SALT_TAG");
+            }
+        } catch {}
+    }
+
+    function _parseAddress(string memory json, string memory key) private pure returns (address) {
+        try vm.parseJsonAddress(json, key) returns (address parsed) {
+            return parsed;
+        } catch {
+            return address(0);
         }
     }
 

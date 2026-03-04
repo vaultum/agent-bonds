@@ -96,6 +96,8 @@ cp .env.example .env
 | `SLASH_BPS` | Slash percentage in basis points (max 10000) |
 | `VALIDATION_FINALITY_POLICY` | 0=ResponseHashRequired, 1=AnyStatusRecord |
 | `STATUS_LOOKUP_FAILURE_POLICY` | 0=CanonicalUnknownAsMissing, 1=AlwaysMissing, 2=AlwaysUnavailable |
+| `DEPLOYMENT_SALT_SECRET` | Required bytes32 secret used for deterministic deployment salts |
+| `SALT_TAG` | Optional namespace tag for deterministic deployments (e.g. `v2`) |
 
 ### Deploy
 
@@ -108,11 +110,17 @@ The `deploy.sh` wrapper handles env loading, network resolution, signer selectio
 # Dry-run (no broadcast)
 ./script/deploy.sh dry-run --network base-sepolia
 
+# Predict deterministic addresses without deploying
+./script/deploy.sh predict --network base-sepolia
+
 # Deploy with Ledger (default)
 ./script/deploy.sh deploy --network base-sepolia
 
 # Deploy with Foundry keystore
 ./script/deploy.sh deploy --network base-sepolia --account deployer
+
+# Deploy with a new deterministic salt namespace
+./script/deploy.sh deploy --network base-sepolia --salt-tag v2
 
 # Post-deployment verification only
 ./script/deploy.sh smoke-test --network base-sepolia
@@ -123,6 +131,8 @@ The `deploy.sh` wrapper handles env loading, network resolution, signer selectio
 # Upgrade ReputationScorer proxy
 ./script/deploy.sh upgrade --network base-sepolia --target scorer
 ```
+
+When `--salt-tag` is set, deployment artifacts are isolated per namespace using a tag-hash filename under `deployments/`, so multiple deterministic namespaces can coexist on the same chain without clobbering each other.
 
 Signing options: Ledger (default) or Foundry encrypted keystore (`--account <name>`). To import a key into the keystore:
 

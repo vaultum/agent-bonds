@@ -184,7 +184,7 @@ contract Upgrade is Script {
     }
 
     function _loadFromArtifacts(string memory key) private view returns (address) {
-        string memory path = string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid), ".json");
+        string memory path = _deploymentArtifactsPath();
         try vm.readFile(path) returns (string memory raw) {
             return _parseAddress(raw, key);
         } catch {
@@ -205,6 +205,25 @@ contract Upgrade is Script {
             return v;
         } catch {
             return address(0);
+        }
+    }
+
+    function _deploymentArtifactsPath() private view returns (string memory) {
+        string memory basePath =
+            string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid));
+        string memory tag = _saltTag();
+        if (bytes(tag).length == 0) {
+            return string.concat(basePath, ".json");
+        }
+
+        return string.concat(basePath, "-", vm.toString(keccak256(bytes(tag))), ".json");
+    }
+
+    function _saltTag() private view returns (string memory tag) {
+        try vm.envString("SALT_TAG") returns (string memory configuredTag) {
+            return configuredTag;
+        } catch {
+            return "";
         }
     }
 

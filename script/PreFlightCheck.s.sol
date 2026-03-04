@@ -32,6 +32,7 @@ contract PreFlightCheck is Script {
         _checkScorerParams();
         _checkManagerParams();
         _checkPolicyParams();
+        _checkDeterministicSaltConfig();
         _checkExistingDeployment();
 
         _printSummary();
@@ -205,28 +206,70 @@ contract PreFlightCheck is Script {
     function _checkExistingDeployment() private {
         console2.log("Checking existing deployments...");
 
-        string memory path = string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid), ".json");
+        string memory path = _deploymentArtifactsPath();
         try vm.readFile(path) returns (string memory raw) {
             if (bytes(raw).length > 2) {
                 address managerProxy = _parseAddress(raw, ".managerProxy");
                 address scorerProxy = _parseAddress(raw, ".scorerProxy");
+                bool managerLive = managerProxy != address(0) && managerProxy.code.length > 0;
+                bool scorerLive = scorerProxy != address(0) && scorerProxy.code.length > 0;
 
-                if (managerProxy != address(0) && managerProxy.code.length > 0) {
-                    _record(false, string.concat("AgentBondManager already deployed at ", vm.toString(managerProxy)));
+                if (managerLive) {
+                    _record(
+                        true,
+                        string.concat(
+                            "AgentBondManager already deployed at ",
+                            vm.toString(managerProxy),
+                            " (idempotent deploy will reuse)"
+                        )
+                    );
                 } else {
                     _record(true, "No live AgentBondManager found");
                 }
 
-                if (scorerProxy != address(0) && scorerProxy.code.length > 0) {
-                    _record(false, string.concat("ReputationScorer already deployed at ", vm.toString(scorerProxy)));
+                if (scorerLive) {
+                    _record(
+                        true,
+                        string.concat(
+                            "ReputationScorer already deployed at ",
+                            vm.toString(scorerProxy),
+                            " (idempotent deploy will reuse)"
+                        )
+                    );
                 } else {
                     _record(true, "No live ReputationScorer found");
+                }
+
+                if (managerLive != scorerLive) {
+                    _record(false, "Partial deployment detected (one proxy live, one missing)");
                 }
             } else {
                 _record(true, "No existing deployment found");
             }
         } catch {
             _record(true, "No deployments file found (fresh deployment)");
+        }
+
+        console2.log("");
+    }
+
+    function _checkDeterministicSaltConfig() private {
+        console2.log("Checking deterministic deployment salt config...");
+
+        try vm.envBytes32("DEPLOYMENT_SALT_SECRET") returns (bytes32 secret) {
+            if (secret == bytes32(0)) {
+                _record(false, "DEPLOYMENT_SALT_SECRET is zero");
+            } else {
+                string memory message = "DEPLOYMENT_SALT_SECRET: configured";
+                try vm.envString("SALT_TAG") returns (string memory tag) {
+                    if (bytes(tag).length > 0) {
+                        message = string.concat(message, " (SALT_TAG=", tag, ")");
+                    }
+                } catch {}
+                _record(true, message);
+            }
+        } catch {
+            _record(false, "DEPLOYMENT_SALT_SECRET: MISSING");
         }
 
         console2.log("");
@@ -276,6 +319,25 @@ contract PreFlightCheck is Script {
             return v;
         } catch {
             return address(0);
+        }
+    }
+
+    function _deploymentArtifactsPath() private view returns (string memory) {
+        string memory basePath =
+            string.concat(vm.projectRoot(), "/deployments/", vm.toString(block.chainid));
+        string memory tag = _saltTag();
+        if (bytes(tag).length == 0) {
+            return string.concat(basePath, ".json");
+        }
+
+        return string.concat(basePath, "-", vm.toString(keccak256(bytes(tag))), ".json");
+    }
+
+    function _saltTag() private view returns (string memory tag) {
+        try vm.envString("SALT_TAG") returns (string memory configuredTag) {
+            return configuredTag;
+        } catch {
+            return "";
         }
     }
 
